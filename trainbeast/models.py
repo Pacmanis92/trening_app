@@ -1,0 +1,74 @@
+from datetime import date, datetime
+
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Exercise(Base):
+    """Definicja ćwiczenia (osobno od jego wystąpienia w treningu)."""
+
+    __tablename__ = "exercise"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    load_type: Mapped[str] = mapped_column(String(10), default="weight")  # "weight" | "distance"
+    effort_type: Mapped[str] = mapped_column(String(10), default="reps")  # "reps" | "time"
+
+
+class Workout(Base):
+    __tablename__ = "workout"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_date: Mapped[date] = mapped_column(Date, unique=True)
+    name: Mapped[str] = mapped_column(String(100), default="")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
+    exercises: Mapped[list["WorkoutExercise"]] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="WorkoutExercise.position",
+    )
+
+
+class WorkoutExercise(Base):
+    """Wystąpienie ćwiczenia w konkretnym treningu."""
+
+    __tablename__ = "workout_exercise"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_id: Mapped[int] = mapped_column(ForeignKey("workout.id", ondelete="CASCADE"))
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercise.id"))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    workout: Mapped[Workout] = relationship(back_populates="exercises")
+    exercise: Mapped[Exercise] = relationship()
+    sets: Mapped[list["WorkoutSet"]] = relationship(
+        back_populates="workout_exercise",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="WorkoutSet.position",
+    )
+
+
+class WorkoutSet(Base):
+    __tablename__ = "workout_set"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_exercise_id: Mapped[int] = mapped_column(
+        ForeignKey("workout_exercise.id", ondelete="CASCADE")
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Jednostki bazowe; wypełnione tylko pola pasujące do typu ćwiczenia.
+    weight_kg: Mapped[float | None] = mapped_column(Float, default=None)
+    distance_m: Mapped[int | None] = mapped_column(Integer, default=None)
+    reps: Mapped[int | None] = mapped_column(Integer, default=None)
+    duration_s: Mapped[int | None] = mapped_column(Integer, default=None)
+    done: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    workout_exercise: Mapped[WorkoutExercise] = relationship(back_populates="sets")
