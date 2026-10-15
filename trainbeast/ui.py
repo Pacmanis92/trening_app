@@ -3,6 +3,8 @@ from datetime import date, timedelta
 import flet as ft
 
 from .services import (
+    EMPTY_SUMMARY,
+    SUMMARY_SEP,
     TrainingService,
     ValidationError,
     done_sets_count,
@@ -116,16 +118,21 @@ class TrainBeastApp:
         self.render()
 
     def _day_bar(self) -> ft.Row:
+        today = date.today()  # przy każdym przerysowaniu, nie przy starcie
+
         def tab(offset: int) -> ft.Container:
             day = self.selected + timedelta(days=offset)
             selected = offset == 0
-            label = "Dzisiaj" if selected and day == date.today() else fmt_short(day)
+            is_today = day == today
+            label = "Dzisiaj" if is_today else fmt_short(day)
             return ft.Container(
                 ft.Text(
                     label,
-                    size=14,
-                    weight=ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL,
+                    size=13,
+                    weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
+                    color=ft.Colors.PRIMARY if is_today and not selected else None,
                     text_align=ft.TextAlign.CENTER,
+                    max_lines=1,
                 ),
                 alignment=ft.Alignment.CENTER,
                 height=56,
@@ -139,14 +146,14 @@ class TrainBeastApp:
             return ft.Container(
                 ft.Icon(icon),
                 alignment=ft.Alignment.CENTER,
-                width=32,
+                width=28,
                 height=56,
                 on_click=lambda e: self._select(self.selected + timedelta(days=delta)),
             )
 
         return ft.Row(
             [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
-            spacing=4,
+            spacing=2,
         )
 
     # --- zawartość wybranego dnia ---
@@ -235,8 +242,15 @@ class TrainBeastApp:
         ]
         for i, st in enumerate(we.sets, start=1):
             rows.append(self._set_row(we.id, we.exercise, i, st))
-        rows.append(big_button("+ Dodaj serię", lambda e, we_id=we.id: self._add_set(we_id), primary=False))
-        rows.append(big_button("Zakończ", lambda e, we=we: self._finish_exercise(we)))
+        rows.append(
+            ft.Row(
+                [
+                    big_button("+ Dodaj serię", lambda e, we_id=we.id: self._add_set(we_id), primary=False, expand=1),
+                    big_button("Zakończ", lambda e, we=we: self._finish_exercise(we), expand=1),
+                ],
+                spacing=8,
+            )
+        )
         return ft.Column(rows, spacing=8)
 
     def _collapsed_content(self, we) -> ft.Control:
@@ -245,10 +259,14 @@ class TrainBeastApp:
             rows.append(
                 ft.Row(
                     [
-                        ft.Icon(
-                            ft.Icons.CHECK_CIRCLE if st.done else ft.Icons.RADIO_BUTTON_UNCHECKED,
-                            size=18,
-                            color=ft.Colors.PRIMARY if st.done else ft.Colors.OUTLINE,
+                        ft.Container(
+                            ft.Icon(
+                                ft.Icons.CHECK_CIRCLE if st.done else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                                size=22,
+                                color=ft.Colors.PRIMARY if st.done else ft.Colors.OUTLINE,
+                            ),
+                            padding=ft.Padding.all(6),
+                            on_click=lambda e, we_id=we.id, sid=st.id, value=not st.done: self._toggle_done_card(we_id, sid, value),
                         ),
                         ft.Text(
                             fmt_set_line(we.exercise, st, i),
@@ -257,7 +275,8 @@ class TrainBeastApp:
                             opacity=1 if st.done else 0.5,
                         ),
                     ],
-                    spacing=8,
+                    spacing=2,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 )
             )
         rows.append(
@@ -283,12 +302,34 @@ class TrainBeastApp:
         self._dialog(
             "Podsumowanie ćwiczenia",
             ft.Column(
-                [ft.Text(we.exercise.name, size=18, weight=ft.FontWeight.BOLD), *(ft.Text(x, size=16) for x in lines)],
+                [ft.Text(we.exercise.name, size=18, weight=ft.FontWeight.BOLD), *self._summary_controls(lines)],
                 tight=True,
                 spacing=6,
             ),
             [ft.TextButton("Zamknij", on_click=lambda e: self.page.pop_dialog())],
         )
+
+    @staticmethod
+    def _summary_controls(lines: list[str]) -> list[ft.Control]:
+        if lines == [EMPTY_SUMMARY]:
+            return [
+                ft.Text(EMPTY_SUMMARY, size=16),
+                ft.Text(
+                    "Czy na pewno oznaczyłeś serie jako wykonane? "
+                    "Zaznacz checkbox przy każdej serii na karcie ćwiczenia.",
+                    size=12,
+                    opacity=0.6,
+                ),
+            ]
+        controls: list[ft.Control] = []
+        for line in lines:
+            if SUMMARY_SEP in line:  # wiersz grupy: dwa pola obok siebie, zawijane parami
+                controls.append(
+                    ft.Row([ft.Text(part, size=16) for part in line.split(SUMMARY_SEP)], wrap=True, spacing=16, run_spacing=2)
+                )
+            else:
+                controls.append(ft.Text(line, size=16))
+        return controls
 
     # --- wiersz serii ---
     @staticmethod
@@ -400,6 +441,11 @@ class TrainBeastApp:
 
     def _toggle_done(self, set_id: int, value: bool) -> None:
         self.service.update_set(set_id, done=value)
+        self._refresh_info()
+
+    def _toggle_done_card(self, we_id: int, set_id: int, value: bool) -> None:
+        self.service.update_set(set_id, done=value)
+        self._refresh_card(we_id)
         self._refresh_info()
 
     def _get_we(self, we_id: int):

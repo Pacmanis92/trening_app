@@ -10,6 +10,9 @@ from .models import Exercise, Workout, WorkoutExercise, WorkoutSet
 LOAD_TYPES = ("weight", "distance")
 EFFORT_TYPES = ("reps", "time")
 
+EMPTY_SUMMARY = "Brak wykonanych serii"
+SUMMARY_SEP = "    "
+
 # (nazwa, load_type, effort_type)
 STARTER_EXERCISES = [
     ("Wyciskanie sztangi leżąc", "weight", "reps"),
@@ -112,29 +115,33 @@ def fmt_time(seconds: int | None) -> str:
     return _join(f"{h}h" if h else "", f"{m}m" if m else "", f"{s}s" if s else "") or "0s"
 
 
-def reps_label(n: int) -> str:
-    if n == 1:
-        word = "powtórzenie"
-    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
-        word = "powtórzenia"
-    else:
-        word = "powtórzeń"
-    return f"{n} {word}"
+def fmt_value(kind: str, value, with_unit: bool = True) -> str:
+    """Wspólny format wartości: kind = weight | distance | reps | time."""
+    if kind == "weight":
+        return fmt_weight(value)
+    if kind == "distance":
+        return fmt_distance(value)
+    if kind == "time":
+        return fmt_time(value)
+    return f"{value or 0} powt." if with_unit else str(value or 0)
 
 
 def fmt_set_line(exercise: Exercise, st: WorkoutSet, number: int) -> str:
-    """Krótka linia serii do widoku skondensowanego, np. „1. 20 kg × 10”."""
-    first = fmt_weight(st.weight_kg) if exercise.load_type == "weight" else fmt_distance(st.distance_m)
+    """Krótka linia serii do widoku skondensowanego, np. „1. 20 kg × 10 powt.”."""
+    if exercise.load_type == "weight":
+        first = fmt_value("weight", st.weight_kg)
+    else:
+        first = fmt_value("distance", st.distance_m)
     if exercise.effort_type == "reps":
-        return f"{number}. {first} × {st.reps or 0}"
-    return f"{number}. {first} — {fmt_time(st.duration_s)}"
+        return f"{number}. {first} × {fmt_value('reps', st.reps)}"
+    return f"{number}. {first} — {fmt_value('time', st.duration_s)}"
 
 
 def summarize_exercise(exercise: Exercise, sets) -> list[str]:
     """Podsumowanie wykonanych serii (linie tekstu); serie niewykonane są pomijane."""
     done = [st for st in sets if st.done]
     if not done:
-        return ["Brak wykonanych serii"]
+        return [EMPTY_SUMMARY]
     by_weight = exercise.load_type == "weight"
     by_reps = exercise.effort_type == "reps"
 
@@ -150,9 +157,13 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
 
     lines = []
     for key in sorted(groups):
-        head = fmt_weight(key) if by_weight else fmt_distance(key)
-        tail = reps_label(groups[key]) if by_reps else fmt_time(groups[key])
-        lines.append(f"{head} {tail}")
+        head = f"Ciężar: {fmt_value('weight', key)}" if by_weight else f"Dystans: {fmt_value('distance', key)}"
+        tail = (
+            f"Powtórzenia: {fmt_value('reps', groups[key], with_unit=False)}"
+            if by_reps
+            else f"Czas: {fmt_value('time', groups[key])}"
+        )
+        lines.append(f"{head}{SUMMARY_SEP}{tail}")
 
     if by_weight and by_reps:
         lines.append(f"Suma przewalonego żelastwa: {fmt_weight(sum(first(st) * second(st) for st in done))}")

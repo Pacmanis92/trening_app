@@ -9,6 +9,7 @@ from trainbeast.services import (
     TrainingService,
     ValidationError,
     done_sets_count,
+    fmt_value,
     parse_distance,
     parse_duration,
     summarize_exercise,
@@ -173,9 +174,9 @@ class _St:
 def test_summary_weight_reps_example():
     sets = [_St(20, 10), _St(30, 10), _St(30, 10), _St(40, 10), _St(100, 10, done=False)]
     assert summarize_exercise(_Ex("weight", "reps"), sets) == [
-        "20 kg 10 powtórzeń",
-        "30 kg 20 powtórzeń",
-        "40 kg 10 powtórzeń",
+        "Ciężar: 20 kg    Powtórzenia: 10",
+        "Ciężar: 30 kg    Powtórzenia: 20",
+        "Ciężar: 40 kg    Powtórzenia: 10",
         "Suma przewalonego żelastwa: 1200 kg",
     ]
 
@@ -183,7 +184,7 @@ def test_summary_weight_reps_example():
 def test_summary_weight_time():
     sets = [_St(20, 90, effort="time"), _St(20, 3600 + 35 * 60 + 15, effort="time"), _St(5, 7, effort="time", done=False)]
     assert summarize_exercise(_Ex("weight", "time"), sets) == [
-        "20 kg 1h 36m 45s",
+        "Ciężar: 20 kg    Czas: 1h 36m 45s",
         "Łączny czas: 1h 36m 45s",
     ]
 
@@ -191,8 +192,8 @@ def test_summary_weight_time():
 def test_summary_distance_reps():
     sets = [_St(400, 10, load="distance"), _St(400, 1, load="distance"), _St(1000, 5, load="distance")]
     assert summarize_exercise(_Ex("distance", "reps"), sets) == [
-        "400m 11 powtórzeń",
-        "1km 5 powtórzeń",
+        "Dystans: 400m    Powtórzenia: 11",
+        "Dystans: 1km    Powtórzenia: 5",
         "Łączny dystans: 9 km 400 m",
     ]
 
@@ -204,7 +205,7 @@ def test_summary_distance_time():
         _St(100, 1, load="distance", effort="time", done=False),
     ]
     assert summarize_exercise(_Ex("distance", "time"), sets) == [
-        "5km 400m 36m 10s",
+        "Dystans: 5km 400m    Czas: 36m 10s",
         "Łączny dystans: 10 km 800 m",
         "Łączny czas: 36m 10s",
     ]
@@ -213,6 +214,43 @@ def test_summary_distance_time():
 def test_summary_ignores_undone_sets():
     assert summarize_exercise(_Ex("weight", "reps"), [_St(20, 10, done=False)]) == ["Brak wykonanych serii"]
     assert summarize_exercise(_Ex("weight", "reps"), []) == ["Brak wykonanych serii"]
+
+
+def test_fmt_value_units_and_zero_parts():
+    assert fmt_value("weight", 20) == "20 kg"
+    assert fmt_value("distance", 5400) == "5km 400m"
+    assert fmt_value("distance", 400) == "400m"
+    assert fmt_value("distance", 5000) == "5km"
+    assert fmt_value("distance", 0) == "0m"
+    assert fmt_value("reps", 10) == "10 powt."
+    assert fmt_value("reps", 10, with_unit=False) == "10"
+    assert fmt_value("time", 2 * 3600 + 35 * 60 + 45) == "2h 35m 45s"
+    assert fmt_value("time", 3600) == "1h"
+    assert fmt_value("time", 0) == "0s"
+
+
+def test_summary_distance_time_row_format():
+    sets = [_St(2200, 325, load="distance", effort="time")]
+    assert summarize_exercise(_Ex("distance", "time"), sets)[0] == "Dystans: 2km 200m    Czas: 5m 25s"
+
+
+def test_summary_weight_time_and_distance_reps_row_format():
+    assert summarize_exercise(_Ex("weight", "time"), [_St(20, 90, effort="time")])[0] == "Ciężar: 20 kg    Czas: 1m 30s"
+    assert summarize_exercise(_Ex("distance", "reps"), [_St(400, 10, load="distance")])[0] == "Dystans: 400m    Powtórzenia: 10"
+
+
+def test_toggle_done_changes_only_one_set_and_persists(db_url):
+    svc = TrainingService(make_session_factory(make_engine(db_url)))
+    w = svc.create_workout(TODAY)
+    we = svc.add_exercise_to_workout(w.id, svc.list_exercises()[0].id)
+    svc.add_set(we.id)
+    svc.add_set(we.id)
+    ids = [st.id for st in svc.get_workout(w.id).exercises[0].sets]
+    svc.update_set(ids[1], done=True)
+    reopened = TrainingService(make_session_factory(make_engine(db_url)))
+    assert [st.done for st in reopened.get_workout(w.id).exercises[0].sets] == [False, True, False]
+    reopened.update_set(ids[1], done=False)
+    assert [st.done for st in reopened.get_workout(w.id).exercises[0].sets] == [False, False, False]
 
 
 def test_edit_and_remove_set(svc):
