@@ -8,6 +8,16 @@ class Base(DeclarativeBase):
     pass
 
 
+class Category(Base):
+    """Kategoria (startowa) lub sekcja własna; `position` ustala kolejność."""
+
+    __tablename__ = "category"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    position: Mapped[int] = mapped_column(Integer)
+
+
 class Exercise(Base):
     """Definicja ćwiczenia (osobno od jego wystąpienia w treningu)."""
 
@@ -15,7 +25,10 @@ class Exercise(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
-    load_type: Mapped[str] = mapped_column(String(10), default="weight")  # "weight" | "distance"
+    category: Mapped[str] = mapped_column(String(100))  # nazwa z tabeli Category
+    # pierwsza oś: "weight" | "distance" | "reps" | "floors"
+    load_type: Mapped[str] = mapped_column(String(10), default="weight")
+    # druga oś: "reps" | "time"
     effort_type: Mapped[str] = mapped_column(String(10), default="reps")  # "reps" | "time"
 
 

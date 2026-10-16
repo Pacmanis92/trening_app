@@ -2,9 +2,12 @@ from datetime import date, timedelta
 
 import pytest
 
+from sqlalchemy import inspect, text
+
 from trainbeast.database import make_engine, make_session_factory
-from trainbeast.models import Exercise, Workout, WorkoutExercise, WorkoutSet
+from trainbeast.models import Category, Exercise, Workout, WorkoutExercise, WorkoutSet
 from trainbeast.services import (
+    STARTER_CATEGORIES,
     STARTER_EXERCISES,
     TrainingService,
     ValidationError,
@@ -12,6 +15,7 @@ from trainbeast.services import (
     fmt_value,
     parse_distance,
     parse_duration,
+    fmt_set_line,
     summarize_exercise,
 )
 
@@ -28,30 +32,13 @@ def svc(db_url):
 
 
 TODAY = date.today()
+CAT = STARTER_CATEGORIES[0]
+STARTER_COUNT = sum(len(v) for v in STARTER_EXERCISES.values())
 
 
 def count(svc, model):
     with svc._sf() as s:
         return len(s.query(model).all())
-
-
-def test_starter_exercises_seeded_once(db_url):
-    for _ in range(2):
-        service = TrainingService(make_session_factory(make_engine(db_url)))
-    exercises = service.list_exercises()
-    assert [e.name for e in exercises] == [n for n, _, _ in STARTER_EXERCISES]
-    hold = next(e for e in exercises if e.name == "Pull-up hold")
-    assert (hold.load_type, hold.effort_type) == ("weight", "time")
-    assert all((e.load_type, e.effort_type) == ("weight", "reps") for e in exercises if e is not hold)
-
-
-def test_seed_adds_only_missing(db_url):
-    svc = TrainingService(make_session_factory(make_engine(db_url)))
-    with svc._sf.begin() as s:
-        s.delete(s.query(Exercise).filter_by(name="Pull-up hold").one())
-    svc = TrainingService(make_session_factory(make_engine(db_url)))
-    names = [e.name for e in svc.list_exercises()]
-    assert names.count("Pull-up hold") == 1 and len(names) == len(STARTER_EXERCISES)
 
 
 def test_create_workout_today_sets_started_at(svc):
@@ -90,35 +77,40 @@ def test_add_exercise_and_sets(svc):
     new = svc.add_set(we.id)
     assert (new.weight_kg, new.reps, new.done) == (82.5, 8, False)
     assert (new.distance_m, new.duration_s) == (None, None)
-    custom = svc.add_exercise_to_workout(w.id, svc.create_exercise("Dipy").id)
+    custom = svc.add_exercise_to_workout(w.id, svc.create_exercise("Dipy", CAT).id)
     assert custom.exercise.name == "Dipy"
     assert len(svc.get_workout(w.id).exercises) == 2
 
 
-@pytest.mark.parametrize("load", ["weight", "distance"])
+@pytest.mark.parametrize("load", ["weight", "distance", "reps", "floors"])
 @pytest.mark.parametrize("effort", ["reps", "time"])
 def test_create_exercise_all_type_combinations(svc, load, effort):
-    ex = svc.create_exercise("  Własne  ", load, effort)
+    if (load, effort) == ("reps", "reps"):
+        with pytest.raises(ValidationError):
+            svc.create_exercise("Własne", CAT, load, effort)
+        return
+    ex = svc.create_exercise("  Własne  ", CAT, load, effort)
     assert (ex.name, ex.load_type, ex.effort_type) == ("Własne", load, effort)
     saved = next(e for e in svc.list_exercises() if e.name == "Własne")
     assert (saved.load_type, saved.effort_type) == (load, effort)
     we = svc.add_exercise_to_workout(svc.create_workout(TODAY).id, ex.id)
     st = we.sets[0]
     assert (st.weight_kg is not None, st.distance_m is not None) == (load == "weight", load == "distance")
-    assert (st.reps is not None, st.duration_s is not None) == (effort == "reps", effort == "time")
+    assert (st.reps is not None) == (load in ("reps", "floors") or effort == "reps")
+    assert (st.duration_s is not None) == (effort == "time")
 
 
-@pytest.mark.parametrize("name", ["", "   ", "pull-UP hold", "Dipy"])
+@pytest.mark.parametrize("name", ["", "   ", "dIPY", "Dipy"])
 def test_create_exercise_rejects_empty_and_duplicate(svc, name):
-    svc.create_exercise("Dipy")
+    svc.create_exercise("Dipy", CAT)
     before = len(svc.list_exercises())
     with pytest.raises(ValidationError):
-        svc.create_exercise(name)
+        svc.create_exercise(name, CAT)
     assert len(svc.list_exercises()) == before
 
 
 def test_distance_and_time_set_roundtrip(svc):
-    ex = svc.create_exercise("Bieg", "distance", "time")
+    ex = svc.create_exercise("Bieg", CAT, "distance", "time")
     we = svc.add_exercise_to_workout(svc.create_workout(TODAY).id, ex.id)
     svc.update_set(
         we.sets[0].id,
@@ -148,7 +140,7 @@ def test_negative_or_bad_parts_rejected(call):
 
 
 def test_negative_base_values_rejected(svc):
-    ex = svc.create_exercise("Bieg", "distance", "time")
+    ex = svc.create_exercise("Bieg", CAT, "distance", "time")
     we = svc.add_exercise_to_workout(svc.create_workout(TODAY).id, ex.id)
     for kwargs in ({"distance_m": -1}, {"duration_s": -1}):
         with pytest.raises(ValidationError):
@@ -272,7 +264,7 @@ def test_cascade_delete_exercise_removes_sets(svc):
     svc.remove_exercise_from_workout(we.id)
     assert count(svc, WorkoutSet) == 0
     assert count(svc, WorkoutExercise) == 0
-    assert count(svc, Exercise) == len(STARTER_EXERCISES)  # definicja zostaje
+    assert count(svc, Exercise) == STARTER_COUNT  # definicja zostaje
 
 
 @pytest.mark.parametrize(
@@ -321,3 +313,153 @@ def test_delete_workout_cascades(svc):
     svc.add_set(we.id)
     svc.delete_workout(w.id)
     assert count(svc, Workout) == count(svc, WorkoutExercise) == count(svc, WorkoutSet) == 0
+
+
+# --- kategorie, sekcje, seed, migracja ---
+def find(svc, en):
+    return next(e for e in svc.list_exercises() if e.name.startswith(en + " ("))
+
+
+def test_nine_categories_in_order(svc):
+    assert [c.name for c in svc.get_categories()] == STARTER_CATEGORIES
+    assert len(STARTER_CATEGORIES) == 9
+    assert STARTER_CATEGORIES[0] == "Chest (Klatka piersiowa)"
+    assert STARTER_CATEGORIES[-1] == "Cardio (Trening kondycyjny)"
+
+
+def test_exercise_names_and_units(svc):
+    bench = find(svc, "Barbell Bench Press")
+    assert bench.name == "Barbell Bench Press (Wyciskanie sztangi na ławce poziomej)"
+    assert (bench.category, bench.load_type, bench.effort_type) == (CAT, "weight", "reps")
+    stair = find(svc, "Stairmaster / Stair Climber")
+    assert (stair.load_type, stair.effort_type) == ("floors", "time")
+    assert (find(svc, "Bench Dips").load_type, find(svc, "Bench Dips").effort_type) == ("weight", "reps")
+    twist = find(svc, "Dumbbell Russian Twist")
+    assert (twist.load_type, twist.effort_type) == ("weight", "reps")
+    assert (find(svc, "Plank").load_type, find(svc, "Plank").effort_type) == ("weight", "time")
+    farmer = find(svc, "Dumbbell Farmer's Walk")
+    assert (farmer.load_type, farmer.effort_type) == ("distance", "time")
+    rope = find(svc, "Jump Rope")
+    assert (rope.load_type, rope.effort_type) == ("weight", "time")
+    assert (find(svc, "Running").load_type, find(svc, "Running").effort_type) == ("distance", "time")
+
+
+def test_every_exercise_has_existing_category(svc):
+    names = {c.name for c in svc.get_categories()}
+    assert len(svc.list_exercises()) == STARTER_COUNT == 84
+    assert all(e.category in names for e in svc.list_exercises())
+    for category in STARTER_CATEGORIES:
+        assert svc.get_exercises_by_category(category)
+
+
+@pytest.mark.parametrize("category", ["", None, "Nie ma takiej"])
+def test_create_exercise_rejects_missing_category(svc, category):
+    before = len(svc.list_exercises())
+    with pytest.raises(ValidationError):
+        svc.create_exercise("Nowe", category)
+    assert len(svc.list_exercises()) == before
+
+
+def test_seed_is_idempotent(db_url):
+    for _ in range(3):
+        service = TrainingService(make_session_factory(make_engine(db_url)))
+    assert len(service.get_categories()) == 9
+    assert len(service.list_exercises()) == STARTER_COUNT
+
+
+def test_custom_exercise_goes_to_its_category(svc):
+    ex = svc.create_exercise("Własne", "Legs (Nogi)", "floors", "time")
+    assert ex.category == "Legs (Nogi)"
+    assert ex.name in [e.name for e in svc.get_exercises_by_category("Legs (Nogi)")]
+    assert ex.name not in [e.name for e in svc.get_exercises_by_category(CAT)]
+
+
+def test_floors_and_reps_measures_roundtrip(svc):
+    w = svc.create_workout(TODAY)
+    stair = svc.add_exercise_to_workout(w.id, find(svc, "Stairmaster / Stair Climber").id)
+    svc.update_set(stair.sets[0].id, reps="12", duration_s=600, done=True)
+    reps_ex = svc.create_exercise("Pompki własne", CAT, "reps", "time")
+    own = svc.add_exercise_to_workout(w.id, reps_ex.id)
+    svc.update_set(own.sets[0].id, reps="30", duration_s=60, done=True)
+    loaded = {we.exercise.name: we for we in svc.get_workout(w.id).exercises}
+    st = loaded[find(svc, "Stairmaster / Stair Climber").name].sets[0]
+    assert (st.reps, st.duration_s, st.weight_kg, st.distance_m) == (12, 600, None, None)
+    assert fmt_set_line(stair.exercise, st, 1) == "1. 12 pięt. — 10m"
+    assert svc.add_set(stair.id).reps == 12
+    lines = summarize_exercise(stair.exercise, [st])
+    assert lines == [f"Piętra: 12    Czas: 10m", "Łączne piętra: 12", "Łączny czas: 10m"]
+    st2 = loaded["Pompki własne"].sets[0]
+    assert summarize_exercise(reps_ex, [st2])[0] == "Powtórzenia: 30    Czas: 1m"
+    assert fmt_set_line(reps_ex, st2, 2) == "2. 30 powt. — 1m"
+
+
+def test_add_section_appended_at_end_and_persists(db_url):
+    svc = TrainingService(make_session_factory(make_engine(db_url)))
+    svc.add_category("  Moja sekcja ")
+    svc.add_category("Druga")
+    expected = STARTER_CATEGORIES + ["Moja sekcja", "Druga"]
+    assert [c.name for c in svc.get_categories()] == expected
+    reopened = TrainingService(make_session_factory(make_engine(db_url)))
+    assert [c.name for c in reopened.get_categories()] == expected
+
+
+@pytest.mark.parametrize("name", ["", "   ", "chest (klatka piersiowa)", "  BACK (PLECY) ", "Moja", " moja "])
+def test_add_section_rejects_empty_and_duplicates(svc, name):
+    svc.add_category("Moja")
+    before = len(svc.get_categories())
+    with pytest.raises(ValidationError):
+        svc.add_category(name)
+    assert len(svc.get_categories()) == before
+
+
+def test_exercise_in_custom_section(db_url):
+    svc = TrainingService(make_session_factory(make_engine(db_url)))
+    svc.add_category("Moja")
+    assert svc.get_exercises_by_category("Moja") == []
+    svc.create_exercise("Ruch", "Moja", "distance", "reps")
+    reopened = TrainingService(make_session_factory(make_engine(db_url)))
+    assert [e.name for e in reopened.get_exercises_by_category("Moja")] == ["Ruch"]
+    assert "Ruch" not in [e.name for c in STARTER_CATEGORIES for e in reopened.get_exercises_by_category(c)]
+
+
+def _old_db(url):
+    """Baza w starym schemacie: exercise bez category + dane."""
+    engine = make_engine(url)
+    with engine.begin() as conn:
+        for table in ("workout_set", "workout_exercise", "workout", "exercise", "category"):
+            conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+        conn.execute(text(
+            "CREATE TABLE exercise (id INTEGER PRIMARY KEY, name VARCHAR(100) UNIQUE, "
+            "load_type VARCHAR(10), effort_type VARCHAR(10))"
+        ))
+        conn.execute(text("INSERT INTO exercise (id, name, load_type, effort_type) VALUES (1, 'Stare', 'weight', 'reps')"))
+        conn.execute(text("CREATE TABLE workout (id INTEGER PRIMARY KEY, workout_date DATE UNIQUE, name VARCHAR(100), started_at DATETIME, ended_at DATETIME)"))
+        conn.execute(text("INSERT INTO workout (id, workout_date, name) VALUES (1, '2024-01-01', 'Stary')"))
+        conn.execute(text("CREATE TABLE workout_exercise (id INTEGER PRIMARY KEY, workout_id INTEGER REFERENCES workout(id) ON DELETE CASCADE, exercise_id INTEGER REFERENCES exercise(id), position INTEGER)"))
+        conn.execute(text("INSERT INTO workout_exercise VALUES (1, 1, 1, 0)"))
+        conn.execute(text("CREATE TABLE workout_set (id INTEGER PRIMARY KEY, workout_exercise_id INTEGER REFERENCES workout_exercise(id) ON DELETE CASCADE, position INTEGER, weight_kg FLOAT, distance_m INTEGER, reps INTEGER, duration_s INTEGER, done BOOLEAN)"))
+        conn.execute(text("INSERT INTO workout_set VALUES (1, 1, 0, 10, NULL, 5, NULL, 1)"))
+    engine.dispose()
+
+
+def test_migration_adds_column_and_cleans_only_once(db_url):
+    _old_db(db_url)
+    svc = TrainingService(make_session_factory(make_engine(db_url)))
+    assert "category" in {c["name"] for c in inspect(svc._sf.kw["bind"]).get_columns("exercise")}
+    assert count(svc, Workout) == count(svc, WorkoutExercise) == count(svc, WorkoutSet) == 0
+    assert "Stare" not in [e.name for e in svc.list_exercises()]
+    assert len(svc.list_exercises()) == STARTER_COUNT
+    # dane użytkownika po migracji nie są usuwane przy kolejnym uruchomieniu
+    svc.create_workout(TODAY, "Nowy")
+    svc.create_exercise("Własne", CAT)
+    again = TrainingService(make_session_factory(make_engine(db_url)))
+    assert count(again, Workout) == 1
+    assert len(again.list_exercises()) == STARTER_COUNT + 1
+    assert len(again.get_categories()) == 9
+
+
+def test_fresh_db_is_not_cleaned(db_url):
+    svc = TrainingService(make_session_factory(make_engine(db_url)))
+    svc.create_workout(TODAY)
+    TrainingService(make_session_factory(make_engine(db_url)))
+    assert count(svc, Workout) == 1

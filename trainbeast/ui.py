@@ -11,6 +11,7 @@ from .services import (
     fmt_set_line,
     parse_distance,
     parse_duration,
+    parse_floors,
     parse_reps,
     parse_weight,
     summarize_exercise,
@@ -81,8 +82,8 @@ class TrainBeastApp:
     def _toast(self, message: str) -> None:
         self.page.show_dialog(ft.SnackBar(ft.Text(message)))
 
-    def _dialog(self, title: str, content: ft.Control | None, actions: list[ft.Control]) -> None:
-        self.page.show_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions))
+    def _dialog(self, title: str, content: ft.Control | None, actions: list[ft.Control], **kwargs) -> None:
+        self.page.show_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions, **kwargs))
 
     # --- główny widok ---
     def render(self) -> None:
@@ -349,11 +350,14 @@ class TrainBeastApp:
         )
 
     def _set_row(self, we_id: int, exercise, number: int, st) -> ft.Control:
-        if exercise.load_type == "weight":
-            first_kind = "weight"
+        first_kind = exercise.load_type
+        if first_kind == "weight":
             first = [self._num_field(fmt_number(st.weight_kg), suffix="kg", expand=2)]
+        elif first_kind == "reps":
+            first = [self._num_field(str(st.reps or 0), suffix="powt.", expand=2)]
+        elif first_kind == "floors":
+            first = [self._num_field(str(st.reps or 0), suffix="pięt.", expand=2)]
         else:
-            first_kind = "distance"
             km, m = divmod(st.distance_m or 0, 1000)
             first = [self._num_field(str(km), label="km"), self._num_field(str(m), label="m")]
         if exercise.effort_type == "reps":
@@ -405,6 +409,8 @@ class TrainBeastApp:
             return {"weight_kg": parse_weight(values[0])}
         if kind == "reps":
             return {"reps": parse_reps(values[0])}
+        if kind == "floors":
+            return {"reps": parse_floors(values[0])}
         if kind == "distance":
             return {"distance_m": parse_distance(*values)}
         return {"duration_s": parse_duration(*values)}
@@ -485,7 +491,9 @@ class TrainBeastApp:
         )
 
     def _open_add_exercise(self, e=None) -> None:
-        items = ft.Column(scroll=ft.ScrollMode.AUTO, width=400, spacing=8)
+        expanded: set[str] = set()  # rozwinięte kategorie/sekcje (tylko UI, domyślnie wszystkie zwinięte)
+        width = min(400, (self.page.width or 390) - 48)
+        items = ft.Column(scroll=ft.ScrollMode.AUTO, width=width, spacing=8)
 
         def add(exercise_id: int):
             try:
@@ -497,32 +505,110 @@ class TrainBeastApp:
             self.page.pop_dialog()
             self.render()
 
-        def fill():
-            items.controls = [
-                ft.Button(ex.name, height=BTN_HEIGHT - 8, on_click=lambda e, exid=ex.id: add(exid))
-                for ex in self.service.list_exercises()
+        def toggle(name: str):
+            expanded.symmetric_difference_update({name})
+            refresh()
+
+        def category_controls(name: str) -> list[ft.Control]:
+            opened = name in expanded
+            controls: list[ft.Control] = [
+                ft.Container(
+                    ft.Row(
+                        [
+                            ft.Text(name, size=16, weight=ft.FontWeight.BOLD, expand=True),
+                            ft.Icon(ft.Icons.EXPAND_LESS if opened else ft.Icons.EXPAND_MORE),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                    border=ft.Border.all(1, ft.Colors.OUTLINE),
+                    border_radius=12,
+                    on_click=lambda e, n=name: toggle(n),
+                )
             ]
+            if opened:
+                for ex in self.service.get_exercises_by_category(name):
+                    controls.append(
+                        ft.Container(
+                            ft.Text(ex.name, size=15),
+                            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                            margin=ft.Margin.only(left=12),
+                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                            border_radius=8,
+                            on_click=lambda e, exid=ex.id: add(exid),
+                        )
+                    )
+                controls.append(
+                    ft.Row(
+                        [
+                            ft.FilledButton(
+                                "Dodaj własne",
+                                height=BTN_HEIGHT - 8,
+                                expand=1,
+                                on_click=lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
+                            ),
+                            ft.Button("Zwiń listę", height=BTN_HEIGHT - 8, expand=1, on_click=lambda e, n=name: toggle(n)),
+                        ],
+                        spacing=8,
+                    )
+                )
+            return controls
+
+        def fill():
+            items.controls = []
+            for category in self.service.get_categories():
+                items.controls.extend(category_controls(category.name))
             items.controls.append(ft.Divider())
             items.controls.append(
-                ft.FilledButton(
-                    "Dodaj własne",
-                    height=BTN_HEIGHT - 8,
-                    on_click=lambda e: self._open_create_exercise(on_created=on_created),
-                )
+                ft.Button("Dodaj sekcję", height=BTN_HEIGHT - 8, on_click=lambda e: self._open_add_section(on_created=refresh))
             )
 
-        def on_created():
+        def refresh():
             fill()
             items.update()
 
         fill()
-        self._dialog("Dodaj ćwiczenie", items, [ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog())])
+        self._dialog(
+            "Dodaj ćwiczenie",
+            items,
+            [ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog())],
+            inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        )
 
-    def _open_create_exercise(self, on_created) -> None:
+    def _open_add_section(self, on_created) -> None:
+        name = ft.TextField(label="Nazwa sekcji", height=FIELD_HEIGHT)
+
+        def create(e):
+            try:
+                self.service.add_category(name.value)
+            except ValidationError as err:
+                name.error = str(err)
+                name.update()
+                return
+            self.page.pop_dialog()  # wraca do listy kategorii
+            on_created()
+
+        self._dialog(
+            "Dodaj sekcję",
+            ft.Column([name], tight=True, width=300),
+            [
+                ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("Dodaj", height=BTN_HEIGHT, on_click=create),
+            ],
+        )
+
+    def _open_create_exercise(self, category: str, on_created) -> None:
         name = ft.TextField(label="Nazwa ćwiczenia", height=FIELD_HEIGHT)
-        load = ft.SegmentedButton(
-            selected=["weight"],
-            segments=[ft.Segment("weight", label=ft.Text("Ciężar")), ft.Segment("distance", label=ft.Text("Dystans"))],
+        load = ft.Dropdown(
+            label="Pierwsza miara",
+            value="weight",
+            options=[
+                ft.DropdownOption(key="weight", text="Ciężar"),
+                ft.DropdownOption(key="distance", text="Dystans"),
+                ft.DropdownOption(key="reps", text="Powtórzenia"),
+                ft.DropdownOption(key="floors", text="Piętra"),
+            ],
         )
         effort = ft.SegmentedButton(
             selected=["reps"],
@@ -531,7 +617,7 @@ class TrainBeastApp:
 
         def create(e):
             try:
-                self.service.create_exercise(name.value, load.selected[0], effort.selected[0])
+                self.service.create_exercise(name.value, category, load.value, effort.selected[0])
             except ValidationError as err:
                 name.error = str(err)
                 name.update()
@@ -541,7 +627,7 @@ class TrainBeastApp:
 
         self._dialog(
             "Własne ćwiczenie",
-            ft.Column([name, load, effort], tight=True, spacing=12, width=400),
+            ft.Column([name, load, effort], tight=True, spacing=12, width=300),
             [
                 ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
                 ft.FilledButton("Dodaj", height=BTN_HEIGHT, on_click=create),

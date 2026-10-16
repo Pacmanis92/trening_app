@@ -5,27 +5,140 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from .models import Exercise, Workout, WorkoutExercise, WorkoutSet
+from .models import Category, Exercise, Workout, WorkoutExercise, WorkoutSet
 
-LOAD_TYPES = ("weight", "distance")
+LOAD_TYPES = ("weight", "distance", "reps", "floors")
 EFFORT_TYPES = ("reps", "time")
 
 EMPTY_SUMMARY = "Brak wykonanych serii"
 SUMMARY_SEP = "    "
 
-# (nazwa, load_type, effort_type)
-STARTER_EXERCISES = [
-    ("Wyciskanie sztangi leżąc", "weight", "reps"),
-    ("Przysiad ze sztangą", "weight", "reps"),
-    ("Martwy ciąg", "weight", "reps"),
-    ("Wiosłowanie sztangą", "weight", "reps"),
-    ("Wyciskanie nad głowę", "weight", "reps"),
-    ("Podciąganie", "weight", "reps"),
-    ("Uginanie ramion", "weight", "reps"),
-    ("Prostowanie ramion na wyciągu", "weight", "reps"),
-    ("Wspięcia na palce", "weight", "reps"),
-    ("Pull-up hold", "weight", "time"),
+WR = ("weight", "reps")
+WT = ("weight", "time")
+DT = ("distance", "time")
+FT = ("floors", "time")
+
+STARTER_CATEGORIES = [
+    "Chest (Klatka piersiowa)",
+    "Back (Plecy)",
+    "Shoulders (Barki)",
+    "Biceps (Biceps)",
+    "Triceps (Triceps)",
+    "Legs (Nogi)",
+    "Glutes (Pośladki)",
+    "Core (Mięśnie brzucha i stabilizatorskie)",
+    "Cardio (Trening kondycyjny)",
 ]
+
+# kategoria -> [(nazwa EN, nazwa PL, pierwsza oś, druga oś)]
+STARTER_EXERCISES: dict[str, list[tuple[str, str, str, str]]] = {
+    STARTER_CATEGORIES[0]: [
+        ("Barbell Bench Press", "Wyciskanie sztangi na ławce poziomej", *WR),
+        ("Dumbbell Bench Press", "Wyciskanie hantli na ławce poziomej", *WR),
+        ("Incline Barbell Press", "Wyciskanie sztangi na ławce skośnej dodatniej", *WR),
+        ("Incline Dumbbell Press", "Wyciskanie hantli na ławce skośnej dodatniej", *WR),
+        ("Decline Barbell Press", "Wyciskanie sztangi na ławce skośnej ujemnej", *WR),
+        ("Decline Dumbbell Press", "Wyciskanie hantli na ławce skośnej ujemnej", *WR),
+        ("Chest Press Machine", "Wyciskanie na maszynie siedząc", *WR),
+        ("Pec Deck / Butterfly Machine", "Rozpiętki na maszynie", *WR),
+        ("Dumbbell Flyes", "Rozpiętki z hantlami", *WR),
+        ("Cable Flyes", "Rozpiętki na bramie / wyciągu", *WR),
+        ("Push-ups", "Pompki klasyczne", *WR),
+        ("Dips", "Pompki na poręczach", *WR),
+    ],
+    STARTER_CATEGORIES[1]: [
+        ("Pull-ups", "Podciąganie na drążku nachwytem", *WR),
+        ("Chin-ups", "Podciąganie na drążku podchwytem", *WR),
+        ("Muscle-ups", "Muscle-up / Wspięcie wspierane na drążku", *WR),
+        ("Barbell Row", "Wiosłowanie sztangą w opadzie tułowia", *WR),
+        ("Dumbbell Row", "Wiosłowanie hantlem jednorącz o ławkę", *WR),
+        ("Seated Cable Row", "Wiosłowanie na wyciągu dolnym siedząc", *WR),
+        ("T-Bar Row", "Wiosłowanie na półsztandze / maszynie T-Bar", *WR),
+        ("Lat Pulldown", "Ściąganie drążka wyciągu górnego do klatki", *WR),
+        ("Barbell Deadlift", "Martwy ciąg ze sztangą", *WR),
+        ("Dumbbell Deadlift", "Martwy ciąg z hantlami", *WR),
+        ("Hyperextension", "Prostowanie tułowia na ławce rzymskiej", *WR),
+    ],
+    STARTER_CATEGORIES[2]: [
+        ("Barbell Overhead Press / Military Press", "Wyciskanie żołnierskie sztangi stojąc", *WR),
+        ("Seated Dumbbell Shoulder Press", "Wyciskanie hantli siedząc", *WR),
+        ("Shoulder Press Machine", "Wyciskanie na barki na maszynie", *WR),
+        ("Dumbbell Lateral Raises", "Wznosy hantli bokiem", *WR),
+        ("Cable Lateral Raises", "Wznosy bokiem na wyciągu", *WR),
+        ("Machine Lateral Raises", "Wznosy bokiem na maszynie", *WR),
+        ("Barbell Front Raises", "Wznosy sztangi w przód", *WR),
+        ("Dumbbell Front Raises", "Wznosy hantli w przód", *WR),
+        ("Dumbbell Rear Delt Flyes", "Odwrotne rozpiętki z hantlami w opadzie", *WR),
+        ("Face Pulls", "Face pull na wyciągu", *WR),
+        ("Pike Push-ups", "Pompki w pozycji pika / na barki", *WR),
+    ],
+    STARTER_CATEGORIES[3]: [
+        ("Barbell Bicep Curl", "Uginanie przedramion ze sztangą prostą / łamaną", *WR),
+        ("Dumbbell Curl", "Uginanie hantlami z supinacją", *WR),
+        ("Barbell Preacher Curl", "Uginanie ramion ze sztangą na modlitewniku", *WR),
+        ("Dumbbell Preacher Curl", "Uginanie ramienia z hantlem na modlitewniku", *WR),
+        ("Machine Bicep Curl", "Uginanie ramion na maszynie", *WR),
+        ("Dumbbell Hammer Curl", "Uginanie ramion z hantlami w chwycie młotkowym", *WR),
+        ("Cable Curl", "Uginanie ramion na wyciągu", *WR),
+    ],
+    STARTER_CATEGORIES[4]: [
+        ("Barbell Skull Crushers", "Wyciskanie francuskie ze sztangą leżąc", *WR),
+        ("Dumbbell Skull Crushers", "Wyciskanie francuskie z hantlami leżąc", *WR),
+        ("Overhead Dumbbell Extension", "Wyciskanie hantla zza głowy", *WR),
+        ("Triceps Pushdown", "Prostowanie ramion na wyciągu ze sznurem / drążkiem", *WR),
+        ("Triceps Extension Machine", "Prostowanie ramion na maszynie", *WR),
+        ("Close-Grip Barbell Bench Press", "Wyciskanie sztangi w wąskim chwycie", *WR),
+        ("Bench Dips", "Pompki tyłem na ławce", *WR),
+        ("Diamond Push-ups", "Pompki diamentowe", *WR),
+    ],
+    STARTER_CATEGORIES[5]: [
+        ("Barbell Back Squat", "Przysiad ze sztangą na plecach", *WR),
+        ("Barbell Front Squat", "Przysiad ze sztangą z przodu", *WR),
+        ("Dumbbell Goblet Squat", "Przysiad z hantlem z przodu", *WR),
+        ("Hack Squat Machine", "Przysiady na maszynie Hack Squat", *WR),
+        ("Leg Press", "Wyciskanie ciężaru na suwnicy", *WR),
+        ("Leg Extension", "Prostowanie nóg na maszynie siedząc", *WR),
+        ("Hamstring / Leg Curl", "Uginanie nóg na maszynie leżąc / siedząc", *WR),
+        ("Barbell Lunge", "Zakroki / Wykroki ze sztangą", *WR),
+        ("Dumbbell Lunge", "Zakroki / Wykroki z hantlami", *WR),
+        ("Standing Calf Raises", "Wspięcia na palce stojąc", *WR),
+        ("Seated Calf Raises", "Wspięcia na palce siedząc na maszynie", *WR),
+    ],
+    STARTER_CATEGORIES[6]: [
+        ("Barbell Hip Thrust", "Hip Thrust ze sztangą", *WR),
+        ("Dumbbell Hip Thrust", "Hip Thrust z hantlem", *WR),
+        ("Hip Thrust Machine", "Hip Thrust na maszynie", *WR),
+        ("Barbell Romanian Deadlift", "Rumuński martwy ciąg ze sztangą", *WR),
+        ("Dumbbell Romanian Deadlift", "Rumuński martwy ciąg z hantlami", *WR),
+        ("Dumbbell Bulgarian Split Squat", "Przysiady bułgarskie z hantlami", *WR),
+        ("Cable Kickbacks", "Wypychanie nogi w tył na wyciągu", *WR),
+        ("Hip Abduction Machine", "Odwodzenie nóg na maszynie siedząc", *WR),
+    ],
+    STARTER_CATEGORIES[7]: [
+        ("Cable Crunches", "Allahy / Skłony tułowia na klęcząco przy wyciągu", *WR),
+        ("Ab Crunch Machine", "Spięcia brzucha na maszynie", *WR),
+        ("Plank", "Deska", *WT),
+        ("Side Plank", "Deska boczna", *WT),
+        ("Hollow Body Hold", "Pozycja hollow body", *WT),
+        ("Toes to Bar", "Unoszenie stóp do drążka w zwisie", *WR),
+        ("Hanging Leg Raises", "Unoszenie nóg w zwisie na drążku", *WR),
+        ("Hyperextension Side Bends", "Skłony boczne na ławce rzymskiej", *WR),
+        ("Dumbbell Russian Twist", "Skręty tułowia z hantlem", *WR),
+        ("Dumbbell Farmer's Walk", "Spacer farmera z hantlami", *DT),
+    ],
+    STARTER_CATEGORIES[8]: [
+        ("Running", "Bieg na bieżni / w terenie", *DT),
+        ("Cycling", "Jazda na rowerku stacjonarnym / terenowym", *DT),
+        ("Elliptical", "Trening na orbitreku", *DT),
+        ("Rowing Machine", "Wioślarz / Ergometr wioślarski", *DT),
+        ("Stairmaster / Stair Climber", "Schody treningowe", *FT),
+        ("Jump Rope", "Skakanie na skakance", *WT),
+    ],
+}
+
+
+def exercise_display_name(en: str, pl: str) -> str:
+    return f"{en} ({pl})"
 
 
 class ValidationError(ValueError):
@@ -52,6 +165,16 @@ def parse_reps(value) -> int:
     if reps < 0:
         raise ValidationError("Powtórzenia nie mogą być ujemne.")
     return reps
+
+
+def parse_floors(value) -> int:
+    try:
+        floors = int(str(value).strip())
+    except ValueError:
+        raise ValidationError("Piętra muszą być liczbą całkowitą.") from None
+    if floors < 0:
+        raise ValidationError("Piętra nie mogą być ujemne.")
+    return floors
 
 
 def _parse_part(value, what: str) -> int:
@@ -116,25 +239,36 @@ def fmt_time(seconds: int | None) -> str:
 
 
 def fmt_value(kind: str, value, with_unit: bool = True) -> str:
-    """Wspólny format wartości: kind = weight | distance | reps | time."""
+    """Wspólny format wartości: kind = weight | distance | reps | floors | time."""
     if kind == "weight":
         return fmt_weight(value)
     if kind == "distance":
         return fmt_distance(value)
     if kind == "time":
         return fmt_time(value)
-    return f"{value or 0} powt." if with_unit else str(value or 0)
+    unit = "pięt." if kind == "floors" else "powt."
+    return f"{value or 0} {unit}" if with_unit else str(value or 0)
+
+
+def first_value(load_type: str, st: WorkoutSet):
+    """Wartość pierwszej osi serii; Powtórzenia i Piętra są zapisywane w polu reps."""
+    if load_type == "weight":
+        return st.weight_kg or 0.0
+    if load_type == "distance":
+        return st.distance_m or 0
+    return st.reps or 0
 
 
 def fmt_set_line(exercise: Exercise, st: WorkoutSet, number: int) -> str:
     """Krótka linia serii do widoku skondensowanego, np. „1. 20 kg × 10 powt.”."""
-    if exercise.load_type == "weight":
-        first = fmt_value("weight", st.weight_kg)
-    else:
-        first = fmt_value("distance", st.distance_m)
+    first = fmt_value(exercise.load_type, first_value(exercise.load_type, st))
     if exercise.effort_type == "reps":
         return f"{number}. {first} × {fmt_value('reps', st.reps)}"
     return f"{number}. {first} — {fmt_value('time', st.duration_s)}"
+
+
+FIRST_LABELS = {"weight": "Ciężar", "distance": "Dystans", "reps": "Powtórzenia", "floors": "Piętra"}
+TOTAL_LABELS = {"reps": "Łączne powtórzenia", "floors": "Łączne piętra"}
 
 
 def summarize_exercise(exercise: Exercise, sets) -> list[str]:
@@ -142,11 +276,11 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
     done = [st for st in sets if st.done]
     if not done:
         return [EMPTY_SUMMARY]
-    by_weight = exercise.load_type == "weight"
+    kind = exercise.load_type
     by_reps = exercise.effort_type == "reps"
 
     def first(st) -> float | int:
-        return (st.weight_kg or 0.0) if by_weight else (st.distance_m or 0)
+        return first_value(kind, st)
 
     def second(st) -> int:
         return (st.reps or 0) if by_reps else (st.duration_s or 0)
@@ -157,7 +291,7 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
 
     lines = []
     for key in sorted(groups):
-        head = f"Ciężar: {fmt_value('weight', key)}" if by_weight else f"Dystans: {fmt_value('distance', key)}"
+        head = f"{FIRST_LABELS[kind]}: {fmt_value(kind, key, with_unit=kind in ('weight', 'distance'))}"
         tail = (
             f"Powtórzenia: {fmt_value('reps', groups[key], with_unit=False)}"
             if by_reps
@@ -165,14 +299,17 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
         )
         lines.append(f"{head}{SUMMARY_SEP}{tail}")
 
-    if by_weight and by_reps:
+    if kind == "weight" and by_reps:
         lines.append(f"Suma przewalonego żelastwa: {fmt_weight(sum(first(st) * second(st) for st in done))}")
-    elif by_weight:
+    elif kind == "weight":
         lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
-    elif by_reps:
+    elif kind == "distance" and by_reps:
         lines.append(f"Łączny dystans: {fmt_distance_total(sum(first(st) * second(st) for st in done))}")
     else:
-        lines.append(f"Łączny dystans: {fmt_distance_total(sum(first(st) for st in done))}")
+        if kind == "distance":
+            lines.append(f"Łączny dystans: {fmt_distance_total(sum(first(st) for st in done))}")
+        else:
+            lines.append(f"{TOTAL_LABELS[kind]}: {sum(first(st) for st in done)}")
         lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
     return lines
 
@@ -190,13 +327,48 @@ class TrainingService:
         self._seed_exercises()
 
     def _seed_exercises(self) -> None:
-        """Idempotentnie: dopisuje brakujące ćwiczenia startowe (po nazwie)."""
+        """Idempotentnie: dopisuje brakujące kategorie i ćwiczenia startowe (po nazwie)."""
         with self._sf.begin() as s:
+            known = {c.lower() for c in s.scalars(select(Category.name))}
+            position = s.scalar(select(func.count(Category.id)))
+            for name in STARTER_CATEGORIES:
+                if name.lower() not in known:
+                    s.add(Category(name=name, position=position))
+                    position += 1
+            s.flush()
             existing = {n.lower() for n in s.scalars(select(Exercise.name))}
-            s.add_all(
-                Exercise(name=name, load_type=load, effort_type=effort)
-                for name, load, effort in STARTER_EXERCISES
-                if name.lower() not in existing
+            for category, items in STARTER_EXERCISES.items():
+                for en, pl, load, effort in items:
+                    name = exercise_display_name(en, pl)
+                    if name.lower() not in existing:
+                        s.add(Exercise(name=name, category=category, load_type=load, effort_type=effort))
+
+    # --- kategorie i sekcje ---
+    def get_categories(self) -> list[Category]:
+        """Kategorie startowe, potem sekcje własne - w kolejności dodania."""
+        with self._sf() as s:
+            return list(s.scalars(select(Category).order_by(Category.position)))
+
+    def add_category(self, name: str) -> Category:
+        name = (name or "").strip()
+        if not name:
+            raise ValidationError("Podaj nazwę sekcji.")
+        duplicate = ValidationError("Kategoria lub sekcja o takiej nazwie już istnieje.")
+        try:
+            with self._sf.begin() as s:
+                if s.scalar(select(Category.id).where(func.lower(Category.name) == name.lower())):
+                    raise duplicate
+                last = s.scalar(select(func.max(Category.position)))
+                category = Category(name=name, position=0 if last is None else last + 1)
+                s.add(category)
+        except IntegrityError:
+            raise duplicate from None
+        return category
+
+    def get_exercises_by_category(self, category: str) -> list[Exercise]:
+        with self._sf() as s:
+            return list(
+                s.scalars(select(Exercise).where(Exercise.category == category).order_by(Exercise.id))
             )
 
     # --- ćwiczenia (definicje) ---
@@ -205,19 +377,26 @@ class TrainingService:
             return list(s.scalars(select(Exercise).order_by(Exercise.id)))
 
     def create_exercise(
-        self, name: str, load_type: str = "weight", effort_type: str = "reps"
+        self, name: str, category: str, load_type: str = "weight", effort_type: str = "reps"
     ) -> Exercise:
+        """Dodaje własne ćwiczenie do istniejącej kategorii lub sekcji."""
         name = (name or "").strip()
         if not name:
             raise ValidationError("Podaj nazwę ćwiczenia.")
         if load_type not in LOAD_TYPES or effort_type not in EFFORT_TYPES:
             raise ValidationError("Nieprawidłowy typ ćwiczenia.")
+        if load_type == "reps" and effort_type == "reps":
+            raise ValidationError("Powtórzenia × Powtórzenia nie są dozwolone.")
         duplicate = ValidationError("Ćwiczenie o takiej nazwie już istnieje.")
         try:
             with self._sf.begin() as s:
+                if not category or not s.scalar(select(Category.id).where(Category.name == category)):
+                    raise ValidationError("Wybierz istniejącą kategorię.")
                 if s.scalar(select(Exercise.id).where(func.lower(Exercise.name) == name.lower())):
                     raise duplicate
-                exercise = Exercise(name=name, load_type=load_type, effort_type=effort_type)
+                exercise = Exercise(
+                    name=name, category=category, load_type=load_type, effort_type=effort_type
+                )
                 s.add(exercise)
         except IntegrityError:
             raise duplicate from None
@@ -312,7 +491,7 @@ class TrainingService:
             position=position,
             weight_kg=0.0 if exercise.load_type == "weight" else None,
             distance_m=0 if exercise.load_type == "distance" else None,
-            reps=0 if exercise.effort_type == "reps" else None,
+            reps=0 if exercise.load_type in ("reps", "floors") or exercise.effort_type == "reps" else None,
             duration_s=0 if exercise.effort_type == "time" else None,
         )
 
