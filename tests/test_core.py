@@ -463,3 +463,208 @@ def test_fresh_db_is_not_cleaned(db_url):
     svc.create_workout(TODAY)
     TrainingService(make_session_factory(make_engine(db_url)))
     assert count(svc, Workout) == 1
+
+
+# --- ograniczenia pól, ciężar, kalendarz ---
+from trainbeast.services import (  # noqa: E402
+    DIGIT_CHAR_PATTERN,
+    MONTH_NAMES,
+    fmt_decimal,
+    is_valid_minsec_input,
+    is_valid_weight_input,
+    month_grid,
+    parse_floors,
+    parse_reps,
+    parse_weight,
+    shift_month,
+)
+import re  # noqa: E402
+
+
+@pytest.mark.parametrize("text", ["", "0", "5", "05", "59", "00"])
+def test_minsec_allowed(text):
+    assert is_valid_minsec_input(text)
+
+
+@pytest.mark.parametrize("text", ["60", "75", "150", "123", "5a", "-1", "5.", " 5", "٣"])
+def test_minsec_rejected(text):
+    assert not is_valid_minsec_input(text)
+
+
+@pytest.mark.parametrize("text,value", [("2.5", 2.5), ("2,5", 2.5), ("80", 80.0), (",5", 0.5), ("0.5", 0.5)])
+def test_weight_accepted(text, value):
+    assert is_valid_weight_input(text)
+    assert parse_weight(text) == value
+
+
+@pytest.mark.parametrize("text", ["2.5.3", "2,5,3", "abc", "-1", "1e5", "", ",", "inf"])
+def test_weight_rejected(text):
+    with pytest.raises(ValidationError):
+        parse_weight(text)
+
+
+def test_weight_input_allows_intermediate_states_but_not_second_separator():
+    assert all(is_valid_weight_input(t) for t in ["", "2.", ".", ","])
+    assert not is_valid_weight_input("2.5.") and not is_valid_weight_input("2.5,3")
+
+
+def test_integer_pattern_only_digits():
+    assert re.fullmatch(DIGIT_CHAR_PATTERN, "7")
+    assert not any(re.fullmatch(DIGIT_CHAR_PATTERN, c) for c in ".,- a")
+
+
+@pytest.mark.parametrize("call", [lambda: parse_reps("2.5"), lambda: parse_floors("-1"), lambda: parse_reps("")])
+def test_int_fields_reject_without_integer_message(call):
+    with pytest.raises(ValidationError) as err:
+        call()
+    assert "całkowit" not in str(err.value)
+
+
+def test_fractional_weight_roundtrip_and_summary(svc):
+    we = svc.add_exercise_to_workout(svc.create_workout(TODAY).id, svc.list_exercises()[0].id)
+    sid = we.sets[0].id
+    svc.update_set(sid, weight_kg=parse_weight("2,5"), reps=3, done=True)
+    svc.add_set(we.id)
+    st = svc.get_workout_by_date(TODAY).exercises[0].sets[0]
+    assert st.weight_kg == 2.5
+    ex = svc.get_workout_by_date(TODAY).exercises[0].exercise
+    assert summarize_exercise(ex, [st]) == ["Ciężar: 2.5 kg    Powtórzenia: 3", "Suma przewalonego żelastwa: 7.5 kg"]
+
+
+def test_fmt_decimal():
+    assert (fmt_decimal(80.0), fmt_decimal(2.5), fmt_decimal(7.500000001), fmt_decimal(0.1 + 0.2)) == ("80", "2.5", "7.5", "0.3")
+
+
+def test_month_grid_january_2027():
+    weeks = month_grid(2027, 1)
+    assert len(weeks) == 5
+    assert weeks[0].days[0] == date(2026, 12, 28) and weeks[-1].days[-1] == date(2027, 1, 31)
+    assert [w.iso_week for w in weeks] == [53, 1, 2, 3, 4]
+    assert all(len(w.days) == 7 for w in weeks)
+
+
+def test_month_grid_six_rows():
+    assert len(month_grid(2026, 8)) == 6
+
+
+def test_shift_month_across_years():
+    assert shift_month(2026, 12, 1) == (2027, 1)
+    assert shift_month(2027, 1, -1) == (2026, 12)
+    assert shift_month(2027, 3, -15) == (2025, 12)
+    assert len(MONTH_NAMES) == 12 and MONTH_NAMES[0] == "STYCZEŃ" and MONTH_NAMES[8] == "WRZESIEŃ"
+
+
+def test_workout_dates_only_with_exercises(svc):
+    ex = svc.list_exercises()[0]
+    full = svc.create_workout(date(2027, 1, 5))
+    svc.add_exercise_to_workout(full.id, ex.id)
+    svc.create_workout(date(2027, 1, 6))
+    other = svc.create_workout(date(2027, 2, 1))
+    svc.add_exercise_to_workout(other.id, ex.id)
+    assert svc.get_workout_dates(2027, 1) == {date(2027, 1, 5)}
+    assert svc.get_workout_dates(2027, 12) == set()
+
+
+@pytest.mark.parametrize("text", ["", "0", "5", "05", "99"])
+def test_distance_input_allowed(text):
+    from trainbeast.services import is_valid_distance_input
+
+    assert is_valid_distance_input(text)
+
+
+@pytest.mark.parametrize("text", ["100", "123", "5.5", "5,5", "-1", "5a", " 5", "٣"])
+def test_distance_input_rejected(text):
+    from trainbeast.services import is_valid_distance_input
+
+    assert not is_valid_distance_input(text)
+
+
+def test_digit_char_pattern_only_digits():
+    import re
+
+    from trainbeast.services import DIGIT_CHAR_PATTERN
+
+    for ch in "0123456789":
+        assert re.fullmatch(DIGIT_CHAR_PATTERN, ch)
+    for bad in ["2.5", "2,5", "-3", "a", " ", "2.", ""]:
+        assert not re.fullmatch(DIGIT_CHAR_PATTERN + "+", bad)
+
+
+def test_calendar_today_only_in_shown_month():
+    from trainbeast.services import is_calendar_today, month_grid
+
+    today = date(2026, 10, 16)
+    days = [d for w in month_grid(2026, 10) for d in w.days]
+    assert [d for d in days if is_calendar_today(d, 10, today)] == [today]
+    assert not any(is_calendar_today(d, 11, today) for w in month_grid(2026, 11) for d in w.days)
+    # dzisiaj widoczne jako dopełnienie tygodnia sąsiedniego miesiąca nie jest zaznaczane
+    edge = date(2026, 11, 1)
+    assert edge in [d for w in month_grid(2026, 10) for d in w.days]
+    assert not is_calendar_today(edge, 10, edge)
+
+
+@pytest.mark.parametrize("text", ["", "0", "45", "007"])
+def test_digits_input_allowed(text):
+    from trainbeast.services import is_valid_digits_input
+
+    assert is_valid_digits_input(text)
+
+
+@pytest.mark.parametrize("text", ["45,5.5", "45.5", "4,5", "-3", "a", "4 5", " "])
+def test_digits_input_rejected(text):
+    from trainbeast.services import is_valid_digits_input
+
+    assert not is_valid_digits_input(text)
+
+
+@pytest.mark.parametrize("text", ["", "  ", " "])
+@pytest.mark.parametrize("sep", [False, True])
+def test_normalize_empty_to_zero(text, sep):
+    from trainbeast.services import normalize_empty_input
+
+    assert normalize_empty_input(text, allow_separator=sep) == "0"
+
+
+@pytest.mark.parametrize("text", [".", ","])
+def test_normalize_separator_only_for_weight(text):
+    from trainbeast.services import normalize_empty_input
+
+    assert normalize_empty_input(text, allow_separator=True) == "0"
+    assert normalize_empty_input(text) == text
+
+
+@pytest.mark.parametrize("text", ["5", "2.5", "0", "05"])
+def test_normalize_keeps_nonempty(text):
+    from trainbeast.services import normalize_empty_input
+
+    assert normalize_empty_input(text, allow_separator=True) == text
+
+
+def test_empty_allowed_by_all_input_validators():
+    from trainbeast.services import is_valid_digits_input, is_valid_distance_input, is_valid_minsec_input, is_valid_weight_input
+
+    for check in (is_valid_digits_input, is_valid_distance_input, is_valid_minsec_input, is_valid_weight_input):
+        assert check("")
+
+
+def test_clear_user_data(svc):
+    custom_cat = svc.add_category("Moja sekcja")
+    svc.add_category("Pusta sekcja")
+    custom = svc.create_exercise("Własne ćwiczenie", custom_cat.name)
+    starter = svc.list_exercises()[0]
+    w = svc.create_workout(TODAY, "x")
+    we = svc.add_exercise_to_workout(w.id, custom.id)
+    svc.add_exercise_to_workout(w.id, starter.id)
+    svc.add_set(we.id)
+    assert count(svc, WorkoutSet) >= 1
+    categories_before = count(svc, Category)
+
+    result = svc.clear_user_data()
+
+    assert count(svc, Workout) == count(svc, WorkoutExercise) == count(svc, WorkoutSet) == 0
+    assert count(svc, Exercise) == STARTER_COUNT
+    assert count(svc, Category) == categories_before
+    assert result["workout"] == 1 and result["exercise"] == 1
+    assert svc.clear_user_data() == {"workout_set": 0, "workout_exercise": 0, "workout": 0, "exercise": 0}
+    assert count(svc, Exercise) == STARTER_COUNT
+    assert starter.name in [e.name for e in svc.list_exercises()]

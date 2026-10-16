@@ -1,7 +1,9 @@
-import math
+import calendar
+import re
 from datetime import date, datetime
+from typing import NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -145,50 +147,74 @@ class ValidationError(ValueError):
     """Błąd danych wejściowych, z komunikatem po polsku."""
 
 
+# --- wzorce znaków dozwolonych w polach (używane jako filtr wejściowy w UI) ---
+DIGIT_CHAR_PATTERN = r"[0-9]"
+WEIGHT_CHAR_PATTERN = r"[0-9.,]"
+_DIGITS_RE = re.compile(r"[0-9]+")
+_WEIGHT_RE = re.compile(r"[0-9]*[.,]?[0-9]*")
+
+
+def is_valid_minsec_input(text: str) -> bool:
+    """Czy tekst pola minut/sekund jest dozwolony: puste (stan pośredni) albo 1-2 cyfry, wartość 0-59."""
+    if text == "":
+        return True
+    return len(text) <= 2 and text.isascii() and text.isdigit() and int(text) <= 59
+
+
+def is_valid_digits_input(text: str) -> bool:
+    """Pole Powtórzenia/Piętra: puste (stan pośredni) albo same cyfry 0-9, bez limitu długości."""
+    return text == "" or (text.isascii() and text.isdigit())
+
+
+def normalize_empty_input(text: str, allow_separator: bool = False) -> str:
+    """Puste pole (albo same spacje, a dla ciężaru także sam separator) -> "0"; reszta bez zmian."""
+    stripped = text.strip()
+    if stripped == "" or (allow_separator and stripped in (".", ",")):
+        return "0"
+    return text
+
+
+def is_valid_distance_input(text: str) -> bool:
+    """Czy tekst pola dystansu (metry) jest dozwolony: puste albo 1-2 cyfry, czyli 0-99."""
+    return text == "" or (len(text) <= 2 and text.isascii() and text.isdigit())
+
+
+def is_calendar_today(day: date, shown_month: int, today: date) -> bool:
+    """Czy komórka kalendarza to dzisiaj: tylko dzień z wyświetlanego miesiąca (nie dopełnienie tygodnia)."""
+    return day == today and day.month == shown_month
+
+
+def is_valid_weight_input(text: str) -> bool:
+    """Czy tekst pola ciężaru jest dozwolony: cyfry i najwyżej jeden separator (kropka lub przecinek)."""
+    return _WEIGHT_RE.fullmatch(text) is not None
+
+
 def parse_weight(value) -> float:
-    try:
-        weight = float(str(value).strip().replace(",", "."))
-    except ValueError:
-        raise ValidationError("Ciężar musi być liczbą.") from None
-    if not math.isfinite(weight):
+    text = str(value).strip()
+    if not _WEIGHT_RE.fullmatch(text) or not any(c.isdigit() for c in text):
         raise ValidationError("Ciężar musi być liczbą.")
-    if weight < 0:
-        raise ValidationError("Ciężar nie może być ujemny.")
-    return weight
+    return float(text.replace(",", "."))
+
+
+def _parse_digits(value, what: str) -> int:
+    text = str(value).strip()
+    if not _DIGITS_RE.fullmatch(text):
+        raise ValidationError(f"{what}: wpisz wartość.")
+    return int(text)
 
 
 def parse_reps(value) -> int:
-    try:
-        reps = int(str(value).strip())
-    except ValueError:
-        raise ValidationError("Powtórzenia muszą być liczbą całkowitą.") from None
-    if reps < 0:
-        raise ValidationError("Powtórzenia nie mogą być ujemne.")
-    return reps
+    return _parse_digits(value, "Powtórzenia")
 
 
 def parse_floors(value) -> int:
-    try:
-        floors = int(str(value).strip())
-    except ValueError:
-        raise ValidationError("Piętra muszą być liczbą całkowitą.") from None
-    if floors < 0:
-        raise ValidationError("Piętra nie mogą być ujemne.")
-    return floors
+    return _parse_digits(value, "Piętra")
 
 
 def _parse_part(value, what: str) -> int:
-    """Człon dystansu/czasu: puste pole = 0, reszta musi być nieujemną liczbą całkowitą."""
+    """Człon dystansu/czasu: puste pole = 0, reszta to same cyfry."""
     text = str(value).strip()
-    if not text:
-        return 0
-    try:
-        number = int(text)
-    except ValueError:
-        raise ValidationError(f"{what}: wpisz liczbę całkowitą.") from None
-    if number < 0:
-        raise ValidationError(f"{what}: wartość nie może być ujemna.")
-    return number
+    return _parse_digits(text, what) if text else 0
 
 
 def parse_distance(km, m) -> int:
@@ -214,8 +240,14 @@ def _parse_base_int(value, what: str) -> int:
 
 
 # --- formaty wyświetlania ---
+def fmt_decimal(value: float | None) -> str:
+    """Liczba bez zbędnych zer: 80 (nie 80.0), 2.5; zaokrąglenie do 3 miejsc usuwa błędy typu 7.500000001."""
+    text = f"{round(value or 0, 3):.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
 def fmt_weight(value: float | None) -> str:
-    return f"{round(value or 0, 3):g} kg"
+    return f"{fmt_decimal(value)} kg"
 
 
 def _join(*parts: str) -> str:
@@ -253,7 +285,7 @@ def fmt_value(kind: str, value, with_unit: bool = True) -> str:
 def first_value(load_type: str, st: WorkoutSet):
     """Wartość pierwszej osi serii; Powtórzenia i Piętra są zapisywane w polu reps."""
     if load_type == "weight":
-        return st.weight_kg or 0.0
+        return round(st.weight_kg or 0.0, 3)
     if load_type == "distance":
         return st.distance_m or 0
     return st.reps or 0
@@ -314,6 +346,30 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
     return lines
 
 
+# --- kalendarz ---
+MONTH_NAMES = (
+    "STYCZEŃ", "LUTY", "MARZEC", "KWIECIEŃ", "MAJ", "CZERWIEC",
+    "LIPIEC", "SIERPIEŃ", "WRZESIEŃ", "PAŹDZIERNIK", "LISTOPAD", "GRUDZIEŃ",
+)
+WEEKDAY_ABBR = ("PN", "WT", "ŚR", "CZ", "PT", "SO", "ND")
+
+
+class CalendarWeek(NamedTuple):
+    iso_week: int
+    days: list[date]  # 7 dat od poniedziałku, razem z dniami sąsiednich miesięcy
+
+
+def month_grid(year: int, month: int) -> list[CalendarWeek]:
+    """Tygodnie (od poniedziałku) pokrywające miesiąc: 5 albo 6 wierszy."""
+    weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(year, month)
+    return [CalendarWeek(week[0].isocalendar()[1], week) for week in weeks]
+
+
+def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
 def _workout_query():
     return select(Workout).options(
         selectinload(Workout.exercises).selectinload(WorkoutExercise.sets),
@@ -342,6 +398,27 @@ class TrainingService:
                     name = exercise_display_name(en, pl)
                     if name.lower() not in existing:
                         s.add(Exercise(name=name, category=category, load_type=load, effort_type=effort))
+
+    def clear_user_data(self) -> dict[str, int]:
+        """Jednorazowe czyszczenie: wszystkie treningi (z ćwiczeniami i seriami) oraz ćwiczenia własne.
+        Zostają ćwiczenia startowe i wszystkie kategorie/sekcje. Zwraca liczby usuniętych rekordów."""
+        starter = {
+            exercise_display_name(en, pl).lower() for items in STARTER_EXERCISES.values() for en, pl, _, _ in items
+        }
+        with self._sf.begin() as s:
+            sets = s.execute(delete(WorkoutSet)).rowcount
+            workout_exercises = s.execute(delete(WorkoutExercise)).rowcount
+            workouts = s.execute(delete(Workout)).rowcount
+            custom = [e.id for e in s.scalars(select(Exercise)) if e.name.lower() not in starter]
+            exercises = 0
+            if custom:
+                exercises = s.execute(delete(Exercise).where(Exercise.id.in_(custom))).rowcount
+        return {
+            "workout_set": sets,
+            "workout_exercise": workout_exercises,
+            "workout": workouts,
+            "exercise": exercises,
+        }
 
     # --- kategorie i sekcje ---
     def get_categories(self) -> list[Category]:
@@ -426,6 +503,21 @@ class TrainingService:
             return s.scalars(
                 _workout_query().where(Workout.workout_date == workout_date)
             ).first()
+
+    def get_workout_dates(self, year: int, month: int) -> set[date]:
+        """Dni miesiąca z treningiem mającym co najmniej jedno ćwiczenie."""
+        first = date(year, month, 1)
+        ny, nm = shift_month(year, month, 1)
+        with self._sf() as s:
+            return set(
+                s.scalars(
+                    select(Workout.workout_date).where(
+                        Workout.workout_date >= first,
+                        Workout.workout_date < date(ny, nm, 1),
+                        Workout.exercises.any(),
+                    )
+                )
+            )
 
     def get_last_workout(self, today: date | None = None) -> Workout | None:
         """Najnowszy trening z datą nie późniejszą niż dziś, który ma co najmniej jedno ćwiczenie."""

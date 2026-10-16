@@ -3,26 +3,45 @@ from datetime import date, timedelta
 import flet as ft
 
 from .services import (
+    DIGIT_CHAR_PATTERN,
     EMPTY_SUMMARY,
+    MONTH_NAMES,
     SUMMARY_SEP,
+    WEEKDAY_ABBR,
+    WEIGHT_CHAR_PATTERN,
     TrainingService,
     ValidationError,
     done_sets_count,
+    fmt_decimal,
     fmt_set_line,
+    is_calendar_today,
+    is_valid_digits_input,
+    is_valid_distance_input,
+    is_valid_minsec_input,
+    is_valid_weight_input,
+    month_grid,
+    normalize_empty_input,
     parse_distance,
     parse_duration,
     parse_floors,
     parse_reps,
     parse_weight,
+    shift_month,
     summarize_exercise,
 )
 
 BTN_HEIGHT = 60
 FIELD_HEIGHT = 60
+CAL_TEXT = "#222222"
+CAL_SAT = ft.Colors.GREY_600
+CAL_SUN = ft.Colors.RED_600
+CAL_WORKOUT_BG = ft.Colors.BLUE_600
+CAL_TODAY_BG = ft.Colors.BLUE_900
 
 
-def fmt_number(value: float | None) -> str:
-    return f"{value or 0:g}"
+def day_color(weekday: int) -> str:
+    """Kolor dnia tygodnia (0 = poniedziałek): sobota szara, niedziela czerwona."""
+    return CAL_SAT if weekday == 5 else CAL_SUN if weekday == 6 else CAL_TEXT
 
 
 def fmt_date(d: date) -> str:
@@ -49,6 +68,7 @@ class TrainBeastApp:
         self.selected = date.today()
         self.workout_id: int | None = None
         self.set_fields: dict[int, list[ft.TextField]] = {}
+        self.set_groups: dict[int, list[tuple[str, list[ft.TextField]]]] = {}
         self.expanded: set[int] = set()  # karty w trybie edycji (tylko UI)
 
         page.title = "TrainBeast"
@@ -88,9 +108,17 @@ class TrainBeastApp:
     # --- główny widok ---
     def render(self) -> None:
         self.set_fields = {}
+        self.set_groups = {}
         self.info_text = ft.Text(self._last_workout_info(), size=16, text_align=ft.TextAlign.CENTER)
         controls: list[ft.Control] = [
-            ft.Row([ft.Text("TrainBeast", size=36, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Row(
+                [
+                    ft.Text("TrainBeast", size=36, weight=ft.FontWeight.BOLD),
+                    ft.IconButton(ft.Icons.CALENDAR_MONTH, icon_size=32, tooltip="Kalendarz", on_click=self._open_calendar),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             self.info_text,
             self._day_bar(),
         ]
@@ -155,6 +183,101 @@ class TrainBeastApp:
         return ft.Row(
             [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
             spacing=2,
+        )
+
+    # --- kalendarz ---
+    def _open_calendar(self, e=None) -> None:
+        state = {"year": self.selected.year, "month": self.selected.month}
+        holder = ft.Container(
+            bgcolor=ft.Colors.WHITE,
+            border=ft.Border.all(1, CAL_TEXT),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=10),
+            width=min(380, (self.page.width or 390) - 24),
+            border_radius=10,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+        def pick(day: date) -> None:
+            self.page.pop_dialog()
+            self._select(day)
+
+        def move(delta: int) -> None:
+            state["year"], state["month"] = shift_month(state["year"], state["month"], delta)
+            holder.content = build()
+            holder.update()
+
+        def build() -> ft.Control:
+            year, month = state["year"], state["month"]
+            marked = self.service.get_workout_dates(year, month)  # z bazy przy każdym otwarciu/zmianie miesiąca
+            line = ft.BorderSide(1, ft.Colors.GREY_400)
+            today = date.today()
+
+            def cell(content: ft.Control, **kwargs) -> ft.Container:
+                return ft.Container(content, expand=1, alignment=ft.Alignment.CENTER, **kwargs)
+
+            header = ft.Row(
+                [
+                    ft.IconButton(ft.Icons.CHEVRON_LEFT, icon_color=CAL_TEXT, on_click=lambda e: move(-1)),
+                    ft.Text(
+                        spans=[
+                            ft.TextSpan(MONTH_NAMES[month - 1], ft.TextStyle(color=CAL_TEXT, weight=ft.FontWeight.BOLD)),
+                            ft.TextSpan(f" {year}", ft.TextStyle(color=ft.Colors.GREY_600)),
+                        ],
+                        size=20,
+                        max_lines=1,
+                        text_align=ft.TextAlign.CENTER,
+                        expand=True,
+                    ),
+                    ft.IconButton(ft.Icons.CHEVRON_RIGHT, icon_color=CAL_TEXT, on_click=lambda e: move(1)),
+                ],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            names = ft.Container(
+                ft.Row(
+                    [
+                        cell(ft.Text(n, size=13, weight=ft.FontWeight.BOLD, color=day_color(i)), height=32)
+                        for i, n in enumerate(WEEKDAY_ABBR)
+                    ],
+                    spacing=0,
+                ),
+                border=ft.Border(top=line, bottom=line),
+            )
+            rows: list[ft.Control] = [header, names]
+            for week in month_grid(year, month):
+                cells = []
+                for day in week.days:
+                    if day.month != month:
+                        cells.append(cell(ft.Text(str(day.day), size=22, color=ft.Colors.GREY_300), height=56))
+                        continue
+                    has_workout = day in marked
+                    is_today = is_calendar_today(day, month, today)
+                    cells.append(
+                        cell(
+                            ft.Text(
+                                str(day.day),
+                                size=22,
+                                weight=ft.FontWeight.W_500,
+                                color=ft.Colors.WHITE if has_workout or is_today else day_color(day.weekday()),
+                            ),
+                            height=56,
+                            bgcolor=CAL_TODAY_BG if is_today else CAL_WORKOUT_BG if has_workout else None,
+                            on_click=lambda e, d=day: pick(d),
+                        )
+                    )
+                rows.append(ft.Container(ft.Row(cells, spacing=0), border=ft.Border(bottom=line)))
+            return ft.Column(rows, spacing=0, tight=True)
+
+        holder.content = build()
+        self.page.show_dialog(
+            ft.AlertDialog(
+                content=holder,
+                bgcolor=ft.Colors.TRANSPARENT,
+                elevation=0,
+                content_padding=0,
+                inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
+                shape=ft.RoundedRectangleBorder(radius=10),
+            )
         )
 
     # --- zawartość wybranego dnia ---
@@ -337,8 +460,12 @@ class TrainBeastApp:
     def _has_error(field: ft.TextField) -> bool:
         return field.border_color == ft.Colors.ERROR
 
-    def _num_field(self, value: str, *, label: str | None = None, suffix: str | None = None, expand: int = 1) -> ft.TextField:
+    def _num_field(
+        self, value: str, *, label: str | None = None, suffix: str | None = None, expand: int = 1, weight: bool = False
+    ) -> ft.TextField:
         return ft.TextField(
+            input_filter=ft.InputFilter(regex_string=WEIGHT_CHAR_PATTERN if weight else DIGIT_CHAR_PATTERN, allow=True),
+            data=is_valid_weight_input if weight else is_valid_digits_input,
             value=value,
             label=label,
             suffix=suffix,
@@ -352,7 +479,7 @@ class TrainBeastApp:
     def _set_row(self, we_id: int, exercise, number: int, st) -> ft.Control:
         first_kind = exercise.load_type
         if first_kind == "weight":
-            first = [self._num_field(fmt_number(st.weight_kg), suffix="kg", expand=2)]
+            first = [self._num_field(fmt_decimal(st.weight_kg), suffix="kg", expand=2, weight=True)]
         elif first_kind == "reps":
             first = [self._num_field(str(st.reps or 0), suffix="powt.", expand=2)]
         elif first_kind == "floors":
@@ -373,12 +500,17 @@ class TrainBeastApp:
                 self._num_field(str(s), label="s"),
             ]
         self.set_fields[st.id] = first + second
+        self.set_groups[st.id] = [(first_kind, first), (second_kind, second)]
+
+        if second_kind == "time":  # minuty i sekundy: 1-2 cyfry, do 59
+            second[1].data = second[2].data = is_valid_minsec_input
+        if first_kind == "distance":  # metry: 0-99
+            first[1].data = is_valid_distance_input
 
         for kind, group in ((first_kind, first), (second_kind, second)):
             for f in group:
-                f.on_change = lambda e, sid=st.id, k=kind, g=group: self._save_group(sid, k, g)
-                if len(group) > 1:
-                    f.on_blur = lambda e, k=kind, g=group: self._normalize(k, g)
+                f.on_change = self._guarded_change(f, lambda e, sid=st.id, k=kind, g=group: self._save_group(sid, k, g))
+                f.on_blur = lambda e, k=kind, g=group: self._on_blur(k, g)
 
         done = ft.Checkbox(value=st.done, scale=1.4)
         done.on_change = lambda e, sid=st.id: self._toggle_done(sid, bool(done.value))
@@ -403,8 +535,25 @@ class TrainBeastApp:
         return ft.Column([header, *quantities], spacing=4)
 
     @staticmethod
+    def _guarded_change(field: ft.TextField, handler):
+        """Niedozwolona wartość (field.data to walidator) jest cofana do poprzedniej, bez komunikatu."""
+        last = [field.value]
+
+        def on_change(e):
+            validator = field.data
+            if validator is not None and not validator(field.value):
+                field.value = last[0]
+                field.update()
+                return
+            last[0] = field.value
+            handler(e)
+
+        on_change.last = last
+        return on_change
+
+    @staticmethod
     def _parse_group(kind: str, fields: list[ft.TextField]) -> dict:
-        values = [f.value for f in fields]
+        values = [normalize_empty_input(f.value, allow_separator=kind == "weight") for f in fields]
         if kind == "weight":
             return {"weight_kg": parse_weight(values[0])}
         if kind == "reps":
@@ -429,6 +578,21 @@ class TrainBeastApp:
         if message and not was_error:
             self._toast(f"{message} Zapisano poprzednią wartość.")
 
+    @staticmethod
+    def _fill_empty(kind: str, fields: list[ft.TextField]) -> None:
+        """Puste pole (lub sam separator w ciężarze) dostaje wyświetlone 0."""
+        for f in fields:
+            filled = normalize_empty_input(f.value, allow_separator=kind == "weight")
+            if filled != f.value:
+                f.value = filled
+                f.on_change.last[0] = filled
+                f.update()
+
+    def _on_blur(self, kind: str, fields: list[ft.TextField]) -> None:
+        self._fill_empty(kind, fields)
+        if len(fields) > 1:
+            self._normalize(kind, fields)
+
     def _normalize(self, kind: str, fields: list[ft.TextField]) -> None:
         """Po opuszczeniu pola: 90 s -> 1 min 30 s, 1500 m -> 1 km 500 m."""
         try:
@@ -443,9 +607,13 @@ class TrainBeastApp:
         for f, v in zip(fields, parts):
             if f.value != str(v):
                 f.value = str(v)
+                f.on_change.last[0] = f.value
                 f.update()
 
     def _toggle_done(self, set_id: int, value: bool) -> None:
+        for kind, group in self.set_groups.get(set_id, []):  # blur może się nie wykonać przy kliknięciu kółka
+            self._fill_empty(kind, group)
+            self._save_group(set_id, kind, group)
         self.service.update_set(set_id, done=value)
         self._refresh_info()
 
