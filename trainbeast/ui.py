@@ -35,8 +35,15 @@ FIELD_HEIGHT = 60
 CAL_TEXT = "#222222"
 CAL_SAT = ft.Colors.GREY_600
 CAL_SUN = ft.Colors.RED_600
-CAL_WORKOUT_BG = ft.Colors.BLUE_600
-CAL_TODAY_BG = ft.Colors.BLUE_900
+ACCENT = "#FCB808"  # żółty ramek (odczytany ze zrzutu inspiracji)
+BLACK = "#000000"
+CAL_WORKOUT_BG = "#FFE9A0"
+CAL_TODAY_BG = ACCENT
+OUTLINE_BTN_RADIUS = 22
+CARD_RADIUS = 12
+DAY_BAR_HEIGHT = 56
+DAY_BAR_RADIUS = (DAY_BAR_HEIGHT + 2) / 2  # pigułka: połowa wysokości paska z ramką
+BTN_FILL = ft.Colors.with_opacity(0.25, ACCENT)  # półprzezroczyste żółte wypełnienie przycisków
 
 
 def day_color(weekday: int) -> str:
@@ -56,8 +63,20 @@ def workout_title(w) -> str:
     return w.name or "Trening"
 
 
-def big_button(text: str, on_click, primary: bool = True, **kwargs) -> ft.Control:
+def outline_style() -> ft.ButtonStyle:
+    """Przycisk z półprzezroczystym żółtym wypełnieniem, żółtą ramką i białym tekstem."""
+    return ft.ButtonStyle(
+        bgcolor=BTN_FILL,
+        color=ft.Colors.WHITE,
+        side=ft.BorderSide(1, ACCENT),
+        shape=ft.RoundedRectangleBorder(radius=OUTLINE_BTN_RADIUS),
+    )
+
+
+def big_button(text: str, on_click, primary: bool = True, outlined: bool = False, **kwargs) -> ft.Control:
     cls = ft.FilledButton if primary else ft.Button
+    if outlined:
+        kwargs["style"] = outline_style()
     return cls(text, on_click=on_click, height=BTN_HEIGHT, expand=kwargs.pop("expand", None), **kwargs)
 
 
@@ -73,6 +92,7 @@ class TrainBeastApp:
 
         page.title = "TrainBeast"
         page.padding = 0
+        page.bgcolor = BLACK
         if page.platform in (ft.PagePlatform.WINDOWS, ft.PagePlatform.MACOS, ft.PagePlatform.LINUX):
             page.window.width = 390  # tylko podgląd na komputerze
             page.window.height = 844
@@ -113,8 +133,26 @@ class TrainBeastApp:
         controls: list[ft.Control] = [
             ft.Row(
                 [
-                    ft.Text("TrainBeast", size=36, weight=ft.FontWeight.BOLD),
-                    ft.IconButton(ft.Icons.CALENDAR_MONTH, icon_size=32, tooltip="Kalendarz", on_click=self._open_calendar),
+                    ft.Text(
+                        spans=[
+                            ft.TextSpan("Train", ft.TextStyle(color=ft.Colors.WHITE)),
+                            ft.TextSpan("Beast", ft.TextStyle(color=ACCENT)),
+                        ],
+                        size=36,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CALENDAR_MONTH,
+                        icon_size=32,
+                        icon_color=ACCENT,
+                        bgcolor=BLACK,
+                        style=ft.ButtonStyle(
+                            side=ft.BorderSide(1, ACCENT),
+                            shape=ft.RoundedRectangleBorder(radius=10),
+                        ),
+                        tooltip="Kalendarz",
+                        on_click=self._open_calendar,
+                    ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -159,30 +197,36 @@ class TrainBeastApp:
                     label,
                     size=13,
                     weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
-                    color=ft.Colors.PRIMARY if is_today and not selected else None,
+                    color=BLACK if selected else ft.Colors.PRIMARY if is_today else None,
                     text_align=ft.TextAlign.CENTER,
                     max_lines=1,
                 ),
                 alignment=ft.Alignment.CENTER,
-                height=56,
+                height=DAY_BAR_HEIGHT,
                 expand=3 if selected else 2,
                 border_radius=12,
-                bgcolor=ft.Colors.PRIMARY_CONTAINER if selected else None,
+                bgcolor=ACCENT if selected else None,
                 on_click=lambda e, d=day: self._select(d),
             )
 
         def arrow(icon, delta: int) -> ft.Container:
             return ft.Container(
-                ft.Icon(icon),
+                ft.Icon(icon, color=ACCENT),
                 alignment=ft.Alignment.CENTER,
                 width=28,
-                height=56,
+                height=DAY_BAR_HEIGHT,
                 on_click=lambda e: self._select(self.selected + timedelta(days=delta)),
             )
 
-        return ft.Row(
-            [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
-            spacing=2,
+        return ft.Container(
+            ft.Row(
+                [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
+                spacing=2,
+            ),
+            bgcolor=BLACK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=DAY_BAR_RADIUS,
+            padding=ft.Padding.symmetric(horizontal=8),
         )
 
     # --- kalendarz ---
@@ -258,7 +302,7 @@ class TrainBeastApp:
                                 str(day.day),
                                 size=22,
                                 weight=ft.FontWeight.W_500,
-                                color=ft.Colors.WHITE if has_workout or is_today else day_color(day.weekday()),
+                                color=BLACK if has_workout or is_today else day_color(day.weekday()),
                             ),
                             height=56,
                             bgcolor=CAL_TODAY_BG if is_today else CAL_WORKOUT_BG if has_workout else None,
@@ -294,6 +338,10 @@ class TrainBeastApp:
             label="Nazwa treningu (opcjonalnie)",
             value=workout.name,
             height=FIELD_HEIGHT,
+            border_radius=CARD_RADIUS,
+            bgcolor=BLACK,
+            border_color=ACCENT,
+            focused_border_color=ACCENT,
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
         )
         self.cards_column = ft.Column(spacing=12)
@@ -303,8 +351,8 @@ class TrainBeastApp:
         return [
             name_field,
             self.cards_column,
-            big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False),
-            big_button("Usuń trening", self._confirm_delete_workout, primary=False),
+            big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, outlined=True),
+            big_button("Usuń trening", self._confirm_delete_workout, primary=False, outlined=True),
         ]
 
     def _add_workout(self, e=None) -> None:
@@ -330,7 +378,7 @@ class TrainBeastApp:
         )
 
     def _exercise_card(self, we) -> ft.Container:
-        card = ft.Container(padding=12, border=ft.Border.all(1, ft.Colors.OUTLINE), border_radius=12)
+        card = ft.Container(padding=12, bgcolor=BLACK, border=ft.Border.all(1, ACCENT), border_radius=CARD_RADIUS)
         card.data = we.id
         self._fill_card(card, we)
         return card
@@ -387,7 +435,7 @@ class TrainBeastApp:
                             ft.Icon(
                                 ft.Icons.CHECK_CIRCLE if st.done else ft.Icons.RADIO_BUTTON_UNCHECKED,
                                 size=22,
-                                color=ft.Colors.PRIMARY if st.done else ft.Colors.OUTLINE,
+                                color=ACCENT if st.done else ft.Colors.OUTLINE,
                             ),
                             padding=ft.Padding.all(6),
                             on_click=lambda e, we_id=we.id, sid=st.id, value=not st.done: self._toggle_done_card(we_id, sid, value),
@@ -405,7 +453,14 @@ class TrainBeastApp:
             )
         rows.append(
             ft.Button(
-                "Podsumowanie ćwiczenia",
+                content=ft.Row(
+                    [
+                        ft.Text("Podsumowanie ćwiczenia", color=ft.Colors.WHITE, expand=True, text_align=ft.TextAlign.CENTER),
+                        ft.Icon(ft.Icons.CHEVRON_RIGHT, color=ACCENT),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                style=outline_style(),
                 height=44,
                 on_click=lambda e, we_id=we.id: self._open_summary(we_id),
             )
