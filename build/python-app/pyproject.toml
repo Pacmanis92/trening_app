@@ -1,0 +1,23 @@
+[project]
+name = "trainbeast"
+version = "1.0.0"
+description = "Mobilny dziennik treningów siłowych"
+requires-python = ">=3.12"
+dependencies = [
+    "flet==1.0.4",
+    "sqlalchemy==2.1.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.flet]
+product = "TrainBeast"
+org = "com.trainbeast"
+build_number = 1
+
+[tool.flet.app]
+exclude = ["tests", "tools", "README.md", "trainbeast.db"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

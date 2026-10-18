@@ -14,6 +14,7 @@ from .services import (
     done_sets_count,
     fmt_decimal,
     fmt_set_line,
+    interpret_swipe,
     is_calendar_today,
     is_valid_digits_input,
     is_valid_distance_input,
@@ -37,7 +38,7 @@ CAL_SAT = ft.Colors.GREY_600
 CAL_SUN = ft.Colors.RED_600
 ACCENT = "#FCB808"  # żółty ramek (odczytany ze zrzutu inspiracji)
 BLACK = "#000000"
-FILL_DARK = "#0D0D0D"  # wypełnienie paska dni, pola nazwy i kart ćwiczeń
+FILL_DARK = "#171717"  # wypełnienie paska dni, pola nazwy i kart ćwiczeń
 SCREEN_MARGIN = 8  # margines ekranu: lewy napisu TrainBeast = prawy ikony kalendarza
 HEADER_ICON_OFFSET = 30 + 4  # dawny hantel (30) + odstęp (4): zachowuje pozycję „NO EXCUSES"
 CAL_WORKOUT_BG = "#FFE9A0"
@@ -47,6 +48,8 @@ CARD_RADIUS = 12
 DAY_BAR_HEIGHT = 56
 DAY_BAR_RADIUS = (DAY_BAR_HEIGHT + 2) / 2  # pigułka: połowa wysokości paska z ramką
 BTN_FILL = ft.Colors.with_opacity(0.25, ACCENT)  # półprzezroczyste żółte wypełnienie przycisków
+ACCENT_DARK = "#584003"  # ciemny odcień żółtego ramek (ACCENT * 0,35): wypełnienie „Usuń trening"
+DONATE_HEIGHT = 36
 
 
 def day_color(weekday: int) -> str:
@@ -66,14 +69,20 @@ def workout_title(w) -> str:
     return w.name or "Trening"
 
 
-def outline_style() -> ft.ButtonStyle:
+def outline_style(padding=None) -> ft.ButtonStyle:
     """Przycisk z półprzezroczystym żółtym wypełnieniem, żółtą ramką i białym tekstem."""
     return ft.ButtonStyle(
         bgcolor=BTN_FILL,
         color=ft.Colors.WHITE,
         side=ft.BorderSide(1, ACCENT),
         shape=ft.RoundedRectangleBorder(radius=OUTLINE_BTN_RADIUS),
+        padding=padding,
     )
+
+
+def delete_style() -> ft.ButtonStyle:
+    """Jak domyślny ft.Button („+ Dodaj serię”: bez ramki, domyślny kształt), ale w odcieniach żółtego."""
+    return ft.ButtonStyle(bgcolor=ACCENT_DARK, color=ACCENT)
 
 
 def big_button(text: str, on_click, primary: bool = True, outlined: bool = False, **kwargs) -> ft.Control:
@@ -81,6 +90,26 @@ def big_button(text: str, on_click, primary: bool = True, outlined: bool = False
     if outlined:
         kwargs["style"] = outline_style()
     return cls(text, on_click=on_click, height=BTN_HEIGHT, expand=kwargs.pop("expand", None), **kwargs)
+
+
+def swipeable(content: ft.Control, on_step) -> ft.GestureDetector:
+    """Poziome przeciągnięcie palcem: on_step(+1) po przeciągnięciu w lewo, on_step(-1) w prawo (zob. interpret_swipe)."""
+    start = {"x": 0.0}
+
+    def on_start(e: ft.DragStartEvent) -> None:
+        start["x"] = e.global_position.x
+
+    def on_end(e: ft.DragEndEvent) -> None:
+        step = interpret_swipe(e.global_position.x - start["x"])
+        if step:
+            on_step(step)
+
+    return ft.GestureDetector(content, on_horizontal_drag_start=on_start, on_horizontal_drag_end=on_end)
+
+
+def own_button(text: str, on_click, **kwargs) -> ft.FilledButton:
+    """„Dodaj własne” i „Dodaj sekcję”: wspólny wygląd w oknie wyboru ćwiczenia."""
+    return ft.FilledButton(text, height=BTN_HEIGHT - 8, on_click=on_click, **kwargs)
 
 
 class TrainBeastApp:
@@ -182,14 +211,27 @@ class TrainBeastApp:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             ft.Row(
-                [ft.Icon(ft.Icons.ACCESS_TIME, color=ACCENT), self.info_text],
+                [
+                    ft.Row(
+                        [ft.Icon(ft.Icons.ACCESS_TIME, color=ACCENT), self.info_text],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        expand=True,
+                    ),
+                    ft.Button(
+                        "Donate",
+                        height=DONATE_HEIGHT,
+                        style=outline_style(padding=ft.Padding.symmetric(horizontal=12)),
+                        on_click=lambda e: None,  # na razie nieaktywny; bez handlera Flet wyszarza przycisk
+                    ),
+                ],
                 spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             self._day_bar(),
         ]
         if self.selected != date.today():
-            controls.append(ft.TextButton("Wróć do dzisiaj", on_click=lambda e: self._select(date.today())))
+            controls.append(ft.TextButton("Wróć do dzisiaj", style=ft.ButtonStyle(color=ft.Colors.WHITE), on_click=lambda e: self._select(date.today())))
         self._show(controls, self._day_content())
 
     def _last_workout_info(self) -> str:
@@ -211,7 +253,7 @@ class TrainBeastApp:
         self.expanded.clear()
         self.render()
 
-    def _day_bar(self) -> ft.Row:
+    def _day_bar(self) -> ft.Control:
         today = date.today()  # przy każdym przerysowaniu, nie przy starcie
 
         def tab(offset: int) -> ft.Container:
@@ -224,7 +266,7 @@ class TrainBeastApp:
                     label,
                     size=13,
                     weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
-                    color=BLACK if selected else ft.Colors.PRIMARY if is_today else None,
+                    color=BLACK if selected else ft.Colors.WHITE if is_today else None,
                     text_align=ft.TextAlign.CENTER,
                     max_lines=1,
                 ),
@@ -245,15 +287,18 @@ class TrainBeastApp:
                 on_click=lambda e: self._select(self.selected + timedelta(days=delta)),
             )
 
-        return ft.Container(
-            ft.Row(
-                [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
-                spacing=2,
+        return swipeable(
+            ft.Container(
+                ft.Row(
+                    [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
+                    spacing=2,
+                ),
+                bgcolor=FILL_DARK,
+                border=ft.Border.all(1, ACCENT),
+                border_radius=DAY_BAR_RADIUS,
+                padding=ft.Padding.symmetric(horizontal=8),
             ),
-            bgcolor=FILL_DARK,
-            border=ft.Border.all(1, ACCENT),
-            border_radius=DAY_BAR_RADIUS,
-            padding=ft.Padding.symmetric(horizontal=8),
+            lambda step: self._select(self.selected + timedelta(days=step)),
         )
 
     # --- kalendarz ---
@@ -337,7 +382,7 @@ class TrainBeastApp:
                         )
                     )
                 rows.append(ft.Container(ft.Row(cells, spacing=0), border=ft.Border(bottom=line)))
-            return ft.Column(rows, spacing=0, tight=True)
+            return swipeable(ft.Column(rows, spacing=0, tight=True), move)
 
         holder.content = build()
         self.page.show_dialog(
@@ -358,11 +403,11 @@ class TrainBeastApp:
             self.workout_id = None
             return [
                 ft.Text("Brak treningu w tym dniu", size=18, text_align=ft.TextAlign.CENTER),
-                big_button("Dodaj trening", self._add_workout),
+                big_button("Dodaj trening", self._add_workout, outlined=True),
             ]
         self.workout_id = workout.id
         name_field = ft.TextField(
-            label="Nazwa treningu (opcjonalnie)",
+            hint_text="Nazwa treningu (opcjonalnie)",
             value=workout.name,
             height=FIELD_HEIGHT,
             border_radius=CARD_RADIUS,
@@ -378,8 +423,13 @@ class TrainBeastApp:
         return [
             name_field,
             self.cards_column,
-            big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, outlined=True),
-            big_button("Usuń trening", self._confirm_delete_workout, primary=False, outlined=True),
+            ft.Row(
+                [
+                    big_button("Usuń trening", self._confirm_delete_workout, primary=False, expand=1, style=delete_style()),
+                    big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, outlined=True, expand=1),
+                ],
+                spacing=8,
+            ),
         ]
 
     def _add_workout(self, e=None) -> None:
@@ -429,7 +479,11 @@ class TrainBeastApp:
         rows: list[ft.Control] = [
             ft.Row(
                 [
-                    ft.Text(we.exercise.name, size=20, weight=ft.FontWeight.BOLD, expand=True),
+                    ft.Container(
+                        ft.Text(we.exercise.name, size=20, weight=ft.FontWeight.BOLD),
+                        expand=True,
+                        on_click=lambda e, we=we: self._finish_exercise(we),
+                    ),
                     ft.IconButton(
                         ft.Icons.DELETE,
                         tooltip="Usuń ćwiczenie",
@@ -495,6 +549,10 @@ class TrainBeastApp:
         return ft.Column(rows, spacing=6, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def _finish_exercise(self, we) -> None:
+        for st in we.sets:  # blur może się nie wykonać: puste pola -> 0 i zapis
+            for kind, group in self.set_groups.get(st.id, []):
+                self._fill_empty(kind, group)
+                self._save_group(st.id, kind, group)
         if any(self._has_error(f) for st in we.sets for f in self.set_fields.get(st.id, [])):
             self._toast("Popraw błędne pola przed zakończeniem ćwiczenia.")
             return
@@ -592,7 +650,7 @@ class TrainBeastApp:
         for kind, group in ((first_kind, first), (second_kind, second)):
             for f in group:
                 f.on_change = self._guarded_change(f, lambda e, sid=st.id, k=kind, g=group: self._save_group(sid, k, g))
-                f.on_blur = lambda e, k=kind, g=group: self._on_blur(k, g)
+                f.on_blur = f.on_submit = lambda e, k=kind, g=group: self._on_blur(k, g)
 
         done = ft.Checkbox(value=st.done, scale=1.4)
         done.on_change = lambda e, sid=st.id: self._toggle_done(sid, bool(done.value))
@@ -654,9 +712,11 @@ class TrainBeastApp:
             message = None
         except ValidationError as err:
             message = str(err)
-        for f in fields:
-            f.border_color = ft.Colors.ERROR if message else None
-            f.update()
+        for f in fields:  # bez odświeżania pola w trakcie pisania, gdy nic się nie zmieniło
+            color = ft.Colors.ERROR if message else None
+            if f.border_color != color:
+                f.border_color = color
+                f.update()
         if message and not was_error:
             self._toast(f"{message} Zapisano poprzednią wartość.")
 
@@ -791,11 +851,10 @@ class TrainBeastApp:
                 controls.append(
                     ft.Row(
                         [
-                            ft.FilledButton(
+                            own_button(
                                 "Dodaj własne",
-                                height=BTN_HEIGHT - 8,
+                                lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
                                 expand=1,
-                                on_click=lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
                             ),
                             ft.Button("Zwiń listę", height=BTN_HEIGHT - 8, expand=1, on_click=lambda e, n=name: toggle(n)),
                         ],
@@ -810,7 +869,7 @@ class TrainBeastApp:
                 items.controls.extend(category_controls(category.name))
             items.controls.append(ft.Divider())
             items.controls.append(
-                ft.Button("Dodaj sekcję", height=BTN_HEIGHT - 8, on_click=lambda e: self._open_add_section(on_created=refresh))
+                own_button("Dodaj sekcję", lambda e: self._open_add_section(on_created=refresh))
             )
 
         def refresh():

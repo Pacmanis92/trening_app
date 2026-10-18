@@ -1,4 +1,5 @@
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event, inspect, text
@@ -9,9 +10,9 @@ from .models import Base, Exercise
 DB_FILENAME = "trainbeast.db"
 
 
-def default_db_path() -> Path:
+def default_db_path(env: Mapping[str, str] | None = None) -> Path:
     """Android: katalog danych aplikacji; komputer: katalog projektu."""
-    storage = os.environ.get("FLET_APP_STORAGE_DATA")
+    storage = (os.environ if env is None else env).get("FLET_APP_STORAGE_DATA")
     if storage:
         Path(storage).mkdir(parents=True, exist_ok=True)
         return Path(storage) / DB_FILENAME

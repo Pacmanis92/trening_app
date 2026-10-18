@@ -368,6 +368,18 @@ def month_grid(year: int, month: int) -> list[CalendarWeek]:
     return [CalendarWeek(week[0].isocalendar()[1], week) for week in weeks]
 
 
+SWIPE_MIN_DISTANCE = 50  # px poziomego przeciągnięcia, od którego gest liczy się jako przesunięcie
+
+
+def interpret_swipe(dx: float, threshold: float = SWIPE_MIN_DISTANCE) -> int:
+    """Przeciągnięcie o dx px: w lewo (dx <= -próg) -> 1 (następny), w prawo (dx >= próg) -> -1 (poprzedni), inaczej 0."""
+    if dx <= -threshold:
+        return 1
+    if dx >= threshold:
+        return -1
+    return 0
+
+
 def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     index = year * 12 + (month - 1) + delta
     return index // 12, index % 12 + 1

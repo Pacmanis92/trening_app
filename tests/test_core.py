@@ -668,3 +668,72 @@ def test_clear_user_data(svc):
     assert svc.clear_user_data() == {"workout_set": 0, "workout_exercise": 0, "workout": 0, "exercise": 0}
     assert count(svc, Exercise) == STARTER_COUNT
     assert starter.name in [e.name for e in svc.list_exercises()]
+
+
+def test_default_db_path_uses_storage_dir(tmp_path):
+    from trainbeast.database import DB_FILENAME, default_db_path
+
+    target = tmp_path / "data" / "app"
+    assert default_db_path({"FLET_APP_STORAGE_DATA": str(target)}) == target / DB_FILENAME
+    assert target.is_dir()
+
+
+@pytest.mark.parametrize("env", [{}, {"FLET_APP_STORAGE_DATA": ""}])
+def test_default_db_path_without_storage_unchanged(env):
+    from pathlib import Path
+
+    import trainbeast.database as database
+
+    expected = Path(database.__file__).resolve().parent.parent / database.DB_FILENAME
+    assert database.default_db_path(env) == expected
+
+
+def test_fresh_database_startup_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLET_APP_STORAGE_DATA", str(tmp_path))
+    for _ in range(2):
+        svc = TrainingService(make_session_factory(make_engine()))
+        assert count(svc, Category) == len(STARTER_CATEGORIES)
+        assert count(svc, Exercise) == STARTER_COUNT
+    assert (tmp_path / "trainbeast.db").exists()
+
+
+@pytest.mark.parametrize("dx, expected", [(-80, 1), (-50, 1), (80, -1), (50, -1), (-49, 0), (49, 0), (0, 0), (3, 0)])
+def test_interpret_swipe(dx, expected):
+    from trainbeast.services import interpret_swipe
+
+    assert interpret_swipe(dx) == expected
+
+
+def test_set_fields_stay_empty_while_editing_and_become_zero_on_blur(svc, monkeypatch):
+    """Obsługa zmiany z pustym tekstem nie dotyka wartości kontrolki; blur / zaznaczenie serii wstawia 0."""
+    import flet as ft
+
+    from trainbeast.ui import TrainBeastApp
+
+    monkeypatch.setattr(ft.BaseControl, "update", lambda self: None)  # bez strony
+    app = TrainBeastApp.__new__(TrainBeastApp)
+    app.service, app.set_fields, app.set_groups, app.expanded = svc, {}, {}, set()
+    app.info_text = ft.Text("")
+    app._refresh_info = lambda: None
+    w = svc.create_workout(TODAY)
+    seen = set()
+    for ex in svc.list_exercises():
+        key = (ex.load_type, ex.effort_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        svc.add_exercise_to_workout(w.id, ex.id)
+        we = svc.get_workout(w.id).exercises[-1]
+        st = we.sets[0]
+        app._set_row(we.id, we.exercise, 1, st)
+        for f in app.set_fields[st.id]:
+            f.value = ""
+            f.on_change(ft.ControlEvent(control=f, name="change", data=""))
+            assert f.value == "" and f.border_color is None
+            f.on_blur(None)
+            assert f.value == "0"
+        for f in app.set_fields[st.id]:  # zaznaczenie serii bez blur: baza dostaje 0, pole pokazuje 0
+            f.value = ""
+        app._toggle_done(st.id, True)
+        assert all(f.value == "0" for f in app.set_fields[st.id])
+    assert seen >= {("weight", "reps"), ("distance", "time"), ("floors", "time")}
