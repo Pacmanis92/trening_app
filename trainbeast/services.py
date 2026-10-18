@@ -174,9 +174,12 @@ def normalize_empty_input(text: str, allow_separator: bool = False) -> str:
     return text
 
 
+DISTANCE_M_MAX_DIGITS = 3
+
+
 def is_valid_distance_input(text: str) -> bool:
-    """Czy tekst pola dystansu (metry) jest dozwolony: puste albo 1-2 cyfry, czyli 0-99."""
-    return text == "" or (len(text) <= 2 and text.isascii() and text.isdigit())
+    """Czy tekst pola dystansu (metry) jest dozwolony: puste albo 1-3 cyfry, czyli 0-999."""
+    return text == "" or (len(text) <= DISTANCE_M_MAX_DIGITS and text.isascii() and text.isdigit())
 
 
 def is_calendar_today(day: date, shown_month: int, today: date) -> bool:

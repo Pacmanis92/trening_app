@@ -37,6 +37,9 @@ CAL_SAT = ft.Colors.GREY_600
 CAL_SUN = ft.Colors.RED_600
 ACCENT = "#FCB808"  # żółty ramek (odczytany ze zrzutu inspiracji)
 BLACK = "#000000"
+FILL_DARK = "#0D0D0D"  # wypełnienie paska dni, pola nazwy i kart ćwiczeń
+SCREEN_MARGIN = 8  # margines ekranu: lewy napisu TrainBeast = prawy ikony kalendarza
+HEADER_ICON_OFFSET = 30 + 4  # dawny hantel (30) + odstęp (4): zachowuje pozycję „NO EXCUSES"
 CAL_WORKOUT_BG = "#FFE9A0"
 CAL_TODAY_BG = ACCENT
 OUTLINE_BTN_RADIUS = 22
@@ -99,17 +102,32 @@ class TrainBeastApp:
         self.render()
 
     # --- infrastruktura ---
-    def _show(self, *controls: ft.Control) -> None:
+    def _show(self, fixed: list[ft.Control], scrolling: list[ft.Control]) -> None:
         self.page.controls.clear()
         self.page.add(
             ft.SafeArea(
                 expand=True,
                 content=ft.Container(
-                    padding=8,
+                    padding=SCREEN_MARGIN,
                     expand=True,
                     content=ft.Column(
-                        list(controls),
-                        scroll=ft.ScrollMode.AUTO,
+                        [
+                            ft.Container(
+                                bgcolor=BLACK,
+                                content=ft.Column(
+                                    list(fixed),
+                                    spacing=12,
+                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                ),
+                            ),
+                            ft.Column(
+                                list(scrolling),
+                                scroll=ft.ScrollMode.AUTO,
+                                expand=True,
+                                spacing=12,
+                                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                            ),
+                        ],
                         expand=True,
                         spacing=12,
                         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -129,7 +147,7 @@ class TrainBeastApp:
     def render(self) -> None:
         self.set_fields = {}
         self.set_groups = {}
-        self.info_text = ft.Text(self._last_workout_info(), size=16, text_align=ft.TextAlign.CENTER)
+        self.info_text = ft.Text(self._last_workout_info(), size=16, expand=True)
         controls: list[ft.Control] = [
             ft.Row(
                 [
@@ -138,8 +156,14 @@ class TrainBeastApp:
                             ft.TextSpan("Train", ft.TextStyle(color=ft.Colors.WHITE)),
                             ft.TextSpan("Beast", ft.TextStyle(color=ACCENT)),
                         ],
-                        size=36,
+                        size=32,
                         weight=ft.FontWeight.BOLD,
+                    ),
+                    ft.Container(
+                        expand=True,
+                        alignment=ft.Alignment.CENTER,
+                        padding=ft.Padding.only(left=HEADER_ICON_OFFSET),
+                        content=ft.Image(src="no_excuses.png", width=96, fit=ft.BoxFit.CONTAIN),
                     ),
                     ft.IconButton(
                         ft.Icons.CALENDAR_MONTH,
@@ -154,16 +178,19 @@ class TrainBeastApp:
                         on_click=self._open_calendar,
                     ),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            self.info_text,
+            ft.Row(
+                [ft.Icon(ft.Icons.ACCESS_TIME, color=ACCENT), self.info_text],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
             self._day_bar(),
         ]
         if self.selected != date.today():
             controls.append(ft.TextButton("Wróć do dzisiaj", on_click=lambda e: self._select(date.today())))
-        controls.extend(self._day_content())
-        self._show(*controls)
+        self._show(controls, self._day_content())
 
     def _last_workout_info(self) -> str:
         last = self.service.get_last_workout()
@@ -223,7 +250,7 @@ class TrainBeastApp:
                 [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
                 spacing=2,
             ),
-            bgcolor=BLACK,
+            bgcolor=FILL_DARK,
             border=ft.Border.all(1, ACCENT),
             border_radius=DAY_BAR_RADIUS,
             padding=ft.Padding.symmetric(horizontal=8),
@@ -339,7 +366,7 @@ class TrainBeastApp:
             value=workout.name,
             height=FIELD_HEIGHT,
             border_radius=CARD_RADIUS,
-            bgcolor=BLACK,
+            bgcolor=FILL_DARK,
             border_color=ACCENT,
             focused_border_color=ACCENT,
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
@@ -378,7 +405,7 @@ class TrainBeastApp:
         )
 
     def _exercise_card(self, we) -> ft.Container:
-        card = ft.Container(padding=12, bgcolor=BLACK, border=ft.Border.all(1, ACCENT), border_radius=CARD_RADIUS)
+        card = ft.Container(padding=12, bgcolor=FILL_DARK, border=ft.Border.all(1, ACCENT), border_radius=CARD_RADIUS)
         card.data = we.id
         self._fill_card(card, we)
         return card
@@ -559,7 +586,7 @@ class TrainBeastApp:
 
         if second_kind == "time":  # minuty i sekundy: 1-2 cyfry, do 59
             second[1].data = second[2].data = is_valid_minsec_input
-        if first_kind == "distance":  # metry: 0-99
+        if first_kind == "distance":  # metry: 0-999
             first[1].data = is_valid_distance_input
 
         for kind, group in ((first_kind, first), (second_kind, second)):

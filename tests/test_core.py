@@ -565,14 +565,14 @@ def test_workout_dates_only_with_exercises(svc):
     assert svc.get_workout_dates(2027, 12) == set()
 
 
-@pytest.mark.parametrize("text", ["", "0", "5", "05", "99"])
+@pytest.mark.parametrize("text", ["", "0", "5", "05", "99", "100", "999"])
 def test_distance_input_allowed(text):
     from trainbeast.services import is_valid_distance_input
 
     assert is_valid_distance_input(text)
 
 
-@pytest.mark.parametrize("text", ["100", "123", "5.5", "5,5", "-1", "5a", " 5", "٣"])
+@pytest.mark.parametrize("text", ["1000", "5.5", "5,5", "-1", "5a", " 5", "٣"])
 def test_distance_input_rejected(text):
     from trainbeast.services import is_valid_distance_input
 
