@@ -11,6 +11,7 @@ from .services import (
     WEIGHT_CHAR_PATTERN,
     TrainingService,
     ValidationError,
+    WorkoutSnapshot,
     done_sets_count,
     fmt_decimal,
     fmt_set_line,
@@ -29,6 +30,7 @@ from .services import (
     parse_weight,
     shift_month,
     summarize_exercise,
+    weekday_abbr,
 )
 
 BTN_HEIGHT = 60
@@ -45,11 +47,17 @@ CAL_WORKOUT_BG = "#FFE9A0"
 CAL_TODAY_BG = ACCENT
 OUTLINE_BTN_RADIUS = 22
 CARD_RADIUS = 12
-DAY_BAR_HEIGHT = 56
-DAY_BAR_RADIUS = (DAY_BAR_HEIGHT + 2) / 2  # pigułka: połowa wysokości paska z ramką
+DAY_TAB_HEIGHT = 32  # dwa wiersze (skrót dnia ok. 12 + data ok. 16) z minimalnym zapasem
+DAY_BAR_V_PAD = 3  # odstęp góra/dół między ramką paska a zakładkami
+DAY_ABBR_SIZE = 10
+DAY_BAR_RADIUS = (DAY_TAB_HEIGHT + 2 * DAY_BAR_V_PAD + 2) / 2  # pigułka: połowa wysokości paska z ramką (40)
+LINK_HEIGHT = 22  # „Wróć do dzisiaj": wysokość pola linku (dawniej ok. 48 z domyślnym polem dotyku)
 BTN_FILL = ft.Colors.with_opacity(0.25, ACCENT)  # półprzezroczyste żółte wypełnienie przycisków
-ACCENT_DARK = "#584003"  # ciemny odcień żółtego ramek (ACCENT * 0,35): wypełnienie „Usuń trening"
-DONATE_HEIGHT = 36
+ACCENT_DARK = "#584003"  # ciemny odcień żółtego ramek (ACCENT * 0,35): wypełnienie „+ Dodaj ćwiczenie" i „Kopiuj"
+HEADER_BTN_HEIGHT = 48  # wysokość ikony kalendarza (32 + 2 * 8); „Donate" ma tę samą
+HEADER_BTN_RADIUS = 10  # zaokrąglenie ikony kalendarza i „Donate"
+HEADER_BTN_BORDER = ft.BorderSide(1, ACCENT)  # ramka ikony kalendarza i „Donate"
+DONATE_WIDTH = 64  # trochę szerszy niż kalendarz (48), napis „Donate" mieści się w jednym wierszu
 
 
 def day_color(weekday: int) -> str:
@@ -70,19 +78,34 @@ def workout_title(w) -> str:
 
 
 def outline_style(padding=None) -> ft.ButtonStyle:
-    """Przycisk z półprzezroczystym żółtym wypełnieniem, żółtą ramką i białym tekstem."""
+    """„Podsumowanie ćwiczenia", „Dodaj trening", „Wklej trening": półprzezroczyste żółte wypełnienie, biały tekst, bez ramki."""
     return ft.ButtonStyle(
         bgcolor=BTN_FILL,
         color=ft.Colors.WHITE,
-        side=ft.BorderSide(1, ACCENT),
         shape=ft.RoundedRectangleBorder(radius=OUTLINE_BTN_RADIUS),
         padding=padding,
     )
 
 
 def delete_style() -> ft.ButtonStyle:
-    """Jak domyślny ft.Button („+ Dodaj serię”: bez ramki, domyślny kształt), ale w odcieniach żółtego."""
-    return ft.ButtonStyle(bgcolor=ACCENT_DARK, color=ACCENT)
+    """Jak domyślny ft.Button („+ Dodaj serię”: bez ramki, domyślny kształt): wypełnienie #171717, żółty tekst."""
+    return ft.ButtonStyle(bgcolor=FILL_DARK, color=ACCENT)
+
+
+def add_exercise_style(padding=None) -> ft.ButtonStyle:
+    """Wspólny styl „+ Dodaj ćwiczenie” i „Kopiuj”: dawny styl „Usuń trening” (ciemnożółte wypełnienie), biały tekst."""
+    return ft.ButtonStyle(bgcolor=ACCENT_DARK, color=ft.Colors.WHITE, padding=padding)
+
+
+def header_btn_style(padding=None) -> ft.ButtonStyle:
+    """Wspólny styl ikony kalendarza i „Donate": czarne wypełnienie, żółta ramka, to samo zaokrąglenie."""
+    return ft.ButtonStyle(
+        bgcolor=BLACK,
+        color=ACCENT,
+        side=HEADER_BTN_BORDER,
+        shape=ft.RoundedRectangleBorder(radius=HEADER_BTN_RADIUS),
+        padding=padding,
+    )
 
 
 def big_button(text: str, on_click, primary: bool = True, outlined: bool = False, **kwargs) -> ft.Control:
@@ -121,6 +144,7 @@ class TrainBeastApp:
         self.set_fields: dict[int, list[ft.TextField]] = {}
         self.set_groups: dict[int, list[tuple[str, list[ft.TextField]]]] = {}
         self.expanded: set[int] = set()  # karty w trybie edycji (tylko UI)
+        self.snapshot: WorkoutSnapshot | None = None  # skopiowany trening (tylko w pamięci)
 
         page.title = "TrainBeast"
         page.padding = 0
@@ -194,35 +218,28 @@ class TrainBeastApp:
                         padding=ft.Padding.only(left=HEADER_ICON_OFFSET),
                         content=ft.Image(src="no_excuses.png", width=96, fit=ft.BoxFit.CONTAIN),
                     ),
-                    ft.IconButton(
-                        ft.Icons.CALENDAR_MONTH,
-                        icon_size=32,
-                        icon_color=ACCENT,
-                        bgcolor=BLACK,
-                        style=ft.ButtonStyle(
-                            side=ft.BorderSide(1, ACCENT),
-                            shape=ft.RoundedRectangleBorder(radius=10),
-                        ),
-                        tooltip="Kalendarz",
-                        on_click=self._open_calendar,
-                    ),
                 ],
                 spacing=4,
+                height=HEADER_BTN_HEIGHT,  # dawniej wysokość wynikała z „Donate"; stała wysokość zachowuje położenie napisów
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             ft.Row(
                 [
-                    ft.Row(
-                        [ft.Icon(ft.Icons.ACCESS_TIME, color=ACCENT), self.info_text],
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                        expand=True,
-                    ),
+                    self.info_text,
                     ft.Button(
                         "Donate",
-                        height=DONATE_HEIGHT,
-                        style=outline_style(padding=ft.Padding.symmetric(horizontal=12)),
+                        width=DONATE_WIDTH,
+                        height=HEADER_BTN_HEIGHT,
+                        style=header_btn_style(padding=ft.Padding.symmetric(horizontal=4)),
                         on_click=lambda e: None,  # na razie nieaktywny; bez handlera Flet wyszarza przycisk
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CALENDAR_MONTH,
+                        icon_size=32,
+                        icon_color=ACCENT,
+                        style=header_btn_style(),
+                        tooltip="Kalendarz",
+                        on_click=self._open_calendar,
                     ),
                 ],
                 spacing=8,
@@ -231,7 +248,7 @@ class TrainBeastApp:
             self._day_bar(),
         ]
         if self.selected != date.today():
-            controls.append(ft.TextButton("Wróć do dzisiaj", style=ft.ButtonStyle(color=ft.Colors.WHITE), on_click=lambda e: self._select(date.today())))
+            controls.append(ft.TextButton("Wróć do dzisiaj", height=LINK_HEIGHT, style=ft.ButtonStyle(color=ft.Colors.WHITE, padding=ft.Padding.symmetric(horizontal=12)), on_click=lambda e: self._select(date.today())))
         self._show(controls, self._day_content())
 
     def _last_workout_info(self) -> str:
@@ -261,17 +278,33 @@ class TrainBeastApp:
             selected = offset == 0
             is_today = day == today
             label = "Dzisiaj" if is_today else fmt_short(day)
+            color = BLACK if selected else ft.Colors.WHITE if is_today else None
             return ft.Container(
-                ft.Text(
-                    label,
-                    size=13,
-                    weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
-                    color=BLACK if selected else ft.Colors.WHITE if is_today else None,
-                    text_align=ft.TextAlign.CENTER,
-                    max_lines=1,
+                ft.Column(
+                    [
+                        ft.Text(
+                            weekday_abbr(day),
+                            size=DAY_ABBR_SIZE,
+                            color=color,
+                            text_align=ft.TextAlign.CENTER,
+                            max_lines=1,
+                        ),
+                        ft.Text(
+                            label,
+                            size=13,
+                            weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
+                            color=color,
+                            text_align=ft.TextAlign.CENTER,
+                            max_lines=1,
+                        ),
+                    ],
+                    spacing=0,
+                    tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 alignment=ft.Alignment.CENTER,
-                height=DAY_BAR_HEIGHT,
+                height=DAY_TAB_HEIGHT,
                 expand=3 if selected else 2,
                 border_radius=12,
                 bgcolor=ACCENT if selected else None,
@@ -283,7 +316,7 @@ class TrainBeastApp:
                 ft.Icon(icon, color=ACCENT),
                 alignment=ft.Alignment.CENTER,
                 width=28,
-                height=DAY_BAR_HEIGHT,
+                height=DAY_TAB_HEIGHT,
                 on_click=lambda e: self._select(self.selected + timedelta(days=delta)),
             )
 
@@ -296,7 +329,7 @@ class TrainBeastApp:
                 bgcolor=FILL_DARK,
                 border=ft.Border.all(1, ACCENT),
                 border_radius=DAY_BAR_RADIUS,
-                padding=ft.Padding.symmetric(horizontal=8),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=DAY_BAR_V_PAD),
             ),
             lambda step: self._select(self.selected + timedelta(days=step)),
         )
@@ -403,7 +436,13 @@ class TrainBeastApp:
             self.workout_id = None
             return [
                 ft.Text("Brak treningu w tym dniu", size=18, text_align=ft.TextAlign.CENTER),
-                big_button("Dodaj trening", self._add_workout, outlined=True),
+                ft.Row(
+                    [
+                        big_button("Dodaj trening", self._add_workout, outlined=True, expand=1),
+                        big_button("Wklej trening", self._paste_workout, outlined=True, expand=1),
+                    ],
+                    spacing=8,
+                ),
             ]
         self.workout_id = workout.id
         name_field = ft.TextField(
@@ -414,6 +453,7 @@ class TrainBeastApp:
             bgcolor=FILL_DARK,
             border_color=ACCENT,
             focused_border_color=ACCENT,
+            expand=True,
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
         )
         self.cards_column = ft.Column(spacing=12)
@@ -421,12 +461,23 @@ class TrainBeastApp:
             self.cards_column.controls.append(self._exercise_card(we))
 
         return [
-            name_field,
+            ft.Row(
+                [
+                    name_field,
+                    ft.Button(
+                        "Kopiuj",
+                        on_click=self._copy_workout,
+                        height=FIELD_HEIGHT,
+                        style=add_exercise_style(padding=ft.Padding.symmetric(horizontal=12)),
+                    ),
+                ],
+                spacing=8,
+            ),
             self.cards_column,
             ft.Row(
                 [
                     big_button("Usuń trening", self._confirm_delete_workout, primary=False, expand=1, style=delete_style()),
-                    big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, outlined=True, expand=1),
+                    big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, expand=1, style=add_exercise_style()),
                 ],
                 spacing=8,
             ),
@@ -437,6 +488,19 @@ class TrainBeastApp:
             self.service.create_workout(self.selected)
         except ValidationError as err:
             self._toast(str(err))
+        self.render()
+
+    def _copy_workout(self, e=None) -> None:
+        snapshot = self.service.snapshot_workout(self.workout_id)
+        if snapshot is None:
+            return
+        self.snapshot = snapshot
+        self._toast("Trening skopiowany")
+
+    def _paste_workout(self, e=None) -> None:
+        if self.snapshot is None:
+            return
+        self.service.paste_snapshot(self.snapshot, self.selected)
         self.render()
 
     def _confirm_delete_workout(self, e=None) -> None:

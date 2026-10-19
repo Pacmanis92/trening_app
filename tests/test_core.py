@@ -737,3 +737,118 @@ def test_set_fields_stay_empty_while_editing_and_become_zero_on_blur(svc, monkey
         app._toggle_done(st.id, True)
         assert all(f.value == "0" for f in app.set_fields[st.id])
     assert seen >= {("weight", "reps"), ("distance", "time"), ("floors", "time")}
+
+
+# --- skróty dni tygodnia ---
+from trainbeast.services import WEEKDAY_ABBR, weekday_abbr  # noqa: E402
+
+
+def test_weekday_abbr_list():
+    assert WEEKDAY_ABBR == ("PN", "WT", "ŚR", "CZ", "PT", "SB", "ND")
+
+
+@pytest.mark.parametrize(
+    "day, expected",
+    [
+        (date(2026, 10, 17), "SB"),
+        (date(2026, 10, 18), "ND"),
+        (date(2026, 10, 19), "PN"),
+        (date(2026, 10, 20), "WT"),
+        (date(2026, 10, 21), "ŚR"),
+        (date(2026, 10, 22), "CZ"),
+        (date(2027, 1, 1), "PT"),
+    ],
+)
+def test_weekday_abbr(day, expected):
+    assert weekday_abbr(day) == expected
+
+
+# --- kopiuj / wklej trening ---
+def _two_exercise_workout(svc, day, name="Push"):
+    ex_w = svc.get_exercises_by_category(CAT)[0]  # ciężar x powtórzenia
+    cardio = svc.get_exercises_by_category(STARTER_CATEGORIES[8])
+    ex_d = next(e for e in cardio if e.load_type == "distance")
+    w = svc.create_workout(day, name)
+    we1 = svc.add_exercise_to_workout(w.id, ex_w.id)
+    svc.update_set(we1.sets[0].id, weight_kg=80, reps=5, done=True)
+    s2 = svc.add_set(we1.id)
+    svc.update_set(s2.id, weight_kg=82.5, reps=3)
+    we2 = svc.add_exercise_to_workout(w.id, ex_d.id)
+    svc.update_set(we2.sets[0].id, distance_m=1500, duration_s=600, done=True)
+    return w
+
+
+def _flat(workout):
+    return (
+        workout.name,
+        [
+            (we.exercise_id, [(s.weight_kg, s.distance_m, s.reps, s.duration_s) for s in we.sets])
+            for we in workout.exercises
+        ],
+    )
+
+
+def test_snapshot_has_name_exercises_sets_in_order(svc):
+    w = _two_exercise_workout(svc, TODAY)
+    snap = svc.snapshot_workout(w.id)
+    assert snap.name == "Push"
+    assert [e.exercise_id for e in snap.exercises] == [we.exercise_id for we in svc.get_workout(w.id).exercises]
+    assert [(s.weight_kg, s.reps) for s in snap.exercises[0].sets] == [(80.0, 5), (82.5, 3)]
+    assert (snap.exercises[1].sets[0].distance_m, snap.exercises[1].sets[0].duration_s) == (1500, 600)
+
+
+def test_snapshot_none_for_empty_or_missing_workout(svc):
+    w = svc.create_workout(TODAY)
+    assert svc.snapshot_workout(w.id) is None
+    assert svc.snapshot_workout(9999) is None
+
+
+def test_paste_creates_equal_workout_with_undone_sets(svc):
+    src = _two_exercise_workout(svc, TODAY)
+    snap = svc.snapshot_workout(src.id)
+    day = TODAY + timedelta(days=1)
+    pasted = svc.paste_snapshot(snap, day)
+    assert pasted.workout_date == day and pasted.id != src.id
+    assert _flat(pasted) == _flat(svc.get_workout(src.id))
+    assert not any(s.done for we in pasted.exercises for s in we.sets)
+    assert [we.position for we in pasted.exercises] == [0, 1]
+
+
+def test_paste_does_not_change_source(svc):
+    src = _two_exercise_workout(svc, TODAY)
+    before = (_flat(svc.get_workout(src.id)), done_sets_count(svc.get_workout(src.id)))
+    svc.paste_snapshot(svc.snapshot_workout(src.id), TODAY + timedelta(days=1))
+    after = svc.get_workout(src.id)
+    assert (_flat(after), done_sets_count(after)) == before
+
+
+def test_snapshot_is_independent_of_later_source_changes(svc):
+    src = _two_exercise_workout(svc, TODAY)
+    snap = svc.snapshot_workout(src.id)
+    expected = _flat(svc.get_workout(src.id))
+    we = svc.get_workout(src.id).exercises[0]
+    svc.update_set(we.sets[0].id, weight_kg=999, reps=99)
+    svc.remove_set(we.sets[1].id)
+    svc.rename_workout(src.id, "Zmienione")
+    svc.remove_exercise_from_workout(svc.get_workout(src.id).exercises[1].id)
+    pasted = svc.paste_snapshot(snap, TODAY + timedelta(days=1))
+    assert _flat(pasted) == expected
+
+
+def test_paste_on_day_with_workout_changes_nothing(svc):
+    src = _two_exercise_workout(svc, TODAY)
+    snap = svc.snapshot_workout(src.id)
+    day = TODAY + timedelta(days=1)
+    existing = svc.create_workout(day, "Inny")
+    counts = [count(svc, m) for m in (Workout, WorkoutExercise, WorkoutSet)]
+    assert svc.paste_snapshot(snap, day) is None
+    assert [count(svc, m) for m in (Workout, WorkoutExercise, WorkoutSet)] == counts
+    assert svc.get_workout_by_date(day).name == "Inny" and svc.get_workout_by_date(day).id == existing.id
+
+
+def test_same_snapshot_can_be_pasted_on_many_days(svc):
+    src = _two_exercise_workout(svc, TODAY)
+    snap = svc.snapshot_workout(src.id)
+    a = svc.paste_snapshot(snap, TODAY + timedelta(days=1))
+    b = svc.paste_snapshot(snap, TODAY + timedelta(days=2))
+    assert a.id != b.id and _flat(a) == _flat(b) == _flat(svc.get_workout(src.id))

@@ -1,5 +1,6 @@
 import calendar
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import NamedTuple
 
@@ -354,7 +355,12 @@ MONTH_NAMES = (
     "STYCZEŃ", "LUTY", "MARZEC", "KWIECIEŃ", "MAJ", "CZERWIEC",
     "LIPIEC", "SIERPIEŃ", "WRZESIEŃ", "PAŹDZIERNIK", "LISTOPAD", "GRUDZIEŃ",
 )
-WEEKDAY_ABBR = ("PN", "WT", "ŚR", "CZ", "PT", "SO", "ND")
+WEEKDAY_ABBR = ("PN", "WT", "ŚR", "CZ", "PT", "SB", "ND")
+
+
+def weekday_abbr(day: date) -> str:
+    """Skrót dnia tygodnia daty (PN…ND), na sztywno, bez locale."""
+    return WEEKDAY_ABBR[day.weekday()]
 
 
 class CalendarWeek(NamedTuple):
@@ -383,6 +389,30 @@ def interpret_swipe(dx: float, threshold: float = SWIPE_MIN_DISTANCE) -> int:
 def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     index = year * 12 + (month - 1) + delta
     return index // 12, index % 12 + 1
+
+
+@dataclass(frozen=True)
+class SetSnapshot:
+    """Wartości serii bez znacznika „wykonana”."""
+
+    weight_kg: float | None
+    distance_m: int | None
+    reps: int | None
+    duration_s: int | None
+
+
+@dataclass(frozen=True)
+class ExerciseSnapshot:
+    exercise_id: int
+    sets: tuple[SetSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class WorkoutSnapshot:
+    """Migawka treningu (same dane, bez referencji do bazy) - do kopiowania na inne dni."""
+
+    name: str
+    exercises: tuple[ExerciseSnapshot, ...]
 
 
 def _workout_query():
@@ -549,6 +579,60 @@ class TrainingService:
     def rename_workout(self, workout_id: int, name: str) -> None:
         with self._sf.begin() as s:
             s.get(Workout, workout_id).name = (name or "").strip()
+
+    def snapshot_workout(self, workout_id: int) -> WorkoutSnapshot | None:
+        """Migawka treningu; None, gdy trening nie istnieje albo nie ma żadnego ćwiczenia. Nic nie zapisuje."""
+        workout = self.get_workout(workout_id)
+        if workout is None or not workout.exercises:
+            return None
+        return WorkoutSnapshot(
+            name=workout.name,
+            exercises=tuple(
+                ExerciseSnapshot(
+                    exercise_id=we.exercise_id,
+                    sets=tuple(
+                        SetSnapshot(st.weight_kg, st.distance_m, st.reps, st.duration_s) for st in we.sets
+                    ),
+                )
+                for we in workout.exercises
+            ),
+        )
+
+    def paste_snapshot(self, snapshot: WorkoutSnapshot, workout_date: date) -> Workout | None:
+        """Tworzy trening z migawki (serie niewykonane). None i brak zmian, gdy dzień ma już trening."""
+        if self.get_workout_by_date(workout_date) is not None:
+            return None
+        try:
+            with self._sf.begin() as s:
+                if any(s.get(Exercise, ex.exercise_id) is None for ex in snapshot.exercises):
+                    return None
+                w = Workout(
+                    workout_date=workout_date,
+                    name=snapshot.name,
+                    started_at=datetime.now() if workout_date == date.today() else None,
+                )
+                for position, ex in enumerate(snapshot.exercises):
+                    w.exercises.append(
+                        WorkoutExercise(
+                            exercise_id=ex.exercise_id,
+                            position=position,
+                            sets=[
+                                WorkoutSet(
+                                    position=i,
+                                    weight_kg=st.weight_kg,
+                                    distance_m=st.distance_m,
+                                    reps=st.reps,
+                                    duration_s=st.duration_s,
+                                    done=False,
+                                )
+                                for i, st in enumerate(ex.sets)
+                            ],
+                        )
+                    )
+                s.add(w)
+        except IntegrityError:
+            return None
+        return self.get_workout(w.id)
 
     def delete_workout(self, workout_id: int) -> None:
         with self._sf.begin() as s:
