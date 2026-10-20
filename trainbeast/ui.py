@@ -71,6 +71,7 @@ DONE_ICON_SIZE = 22  # wskaźnik wykonania serii: wspólny dla widoku edycji i n
 DONE_ICON_PAD = 6
 UNIT_MENU_WIDTH = 112  # minimalna szerokość menu Material; linia rozdzielająca ma całą szerokość
 EDIT_BTN_HEIGHT = 40  # „+ Dodaj serię" i „Zakończ" w karcie edycji
+LIST_BTN_HEIGHT = BTN_HEIGHT - 8  # „Zwiń listę” i „+ Dodaj serię”: ten sam domyślny styl i wysokość
 EDIT_BTN_GAP = 12  # dodatkowy odstęp między ostatnią serią a wierszem przycisków
 HEADER_BTN_HEIGHT = 48  # wysokość ikony kalendarza (32 + 2 * 8); „Donate" ma tę samą
 HEADER_BTN_RADIUS = 10  # zaokrąglenie ikony kalendarza i „Donate"
@@ -479,6 +480,7 @@ class TrainBeastApp:
             value=workout.name,
             border=ft.InputBorder.NONE,
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=0),
+            text_vertical_align=ft.VerticalAlignment.CENTER,
             height=NAME_ROW_HEIGHT - 2,
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
         )
@@ -494,10 +496,9 @@ class TrainBeastApp:
         copy_button = ft.Container(  # Container zamiast przycisku Flet: ten ma minimalną wysokość i nie da się go zrównać z polem
             ft.Text("Kopiuj", color=ft.Colors.WHITE),
             height=NAME_ROW_HEIGHT,
-            padding=ft.Padding.symmetric(horizontal=12),
+            padding=ft.Padding.symmetric(horizontal=13),  # 12 + dawna grubość ramki (1): szerokość bez zmian
             alignment=ft.Alignment.CENTER,
             bgcolor=ACCENT_DARK,
-            border=ft.Border.all(1, ACCENT),
             border_radius=CARD_RADIUS,
             ink=True,
             on_click=self._copy_workout,
@@ -605,11 +606,8 @@ class TrainBeastApp:
                     ),
                     ft.Button(
                         "+ Dodaj serię",
-                        height=EDIT_BTN_HEIGHT,
+                        height=LIST_BTN_HEIGHT,
                         expand=1,
-                        style=ft.ButtonStyle(
-                            bgcolor=FILL_DARK, color=ACCENT, shape=ft.RoundedRectangleBorder(radius=EDIT_BTN_HEIGHT / 2)
-                        ),
                         on_click=lambda e, we_id=we.id: self._add_set(we_id),
                     ),
                     ft.FilledButton(
@@ -704,7 +702,7 @@ class TrainBeastApp:
         controls: list[ft.Control] = []
         for group in groups:
             if group.heading:  # kilka jednostek: nagłówek z jednostką nad wynikami grupy
-                controls.append(ft.Text(group.heading, size=14, weight=ft.FontWeight.BOLD, color=ACCENT))
+                controls.append(ft.Text(group.heading, size=14, weight=ft.FontWeight.BOLD, color=ACTION_BLUE))
             controls.extend(ft.Text(line, size=16) for line in group.lines)
         return controls
 
@@ -1059,7 +1057,7 @@ class TrainBeastApp:
                                 lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
                                 expand=1,
                             ),
-                            ft.Button("Zwiń listę", height=BTN_HEIGHT - 8, expand=1, on_click=lambda e, n=name: toggle(n)),
+                            ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, on_click=lambda e, n=name: toggle(n)),
                         ],
                         spacing=8,
                     )
