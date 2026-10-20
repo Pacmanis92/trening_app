@@ -147,9 +147,7 @@ class ValidationError(ValueError):
     """Błąd danych wejściowych, z komunikatem po polsku."""
 
 
-# --- wzorce znaków dozwolonych w polach (używane jako filtr wejściowy w UI) ---
-DIGIT_CHAR_PATTERN = r"[0-9]"
-WEIGHT_CHAR_PATTERN = r"[0-9.,]"
+# --- wzorce dozwolonych wartości pól liczbowych (walidacja w UI po każdej zmianie) ---
 _DIGITS_RE = re.compile(r"[0-9]+")
 _WEIGHT_RE = re.compile(r"[0-9]*[.,]?[0-9]*")
 
@@ -249,17 +247,17 @@ def fmt_decimal(value: float | None) -> str:
     return "0" if text in ("", "-0") else text
 
 
-def fmt_weight(value: float | None) -> str:
-    return f"{fmt_decimal(value)} kg"
+def fmt_weight(value: float | None, unit: str = "kg") -> str:
+    return f"{fmt_decimal(value)} {unit}"
 
 
 def _join(*parts: str) -> str:
     return " ".join(p for p in parts if p)
 
 
-def fmt_distance(meters: int | None) -> str:
+def fmt_distance(meters: int | None, unit: str = "km", unit_minor: str = "m") -> str:
     km, m = divmod(meters or 0, 1000)
-    return _join(f"{km}km" if km else "", f"{m}m" if m else "") or "0m"
+    return _join(f"{km}{unit}" if km else "", f"{m}{unit_minor}" if m else "") or f"0{unit_minor}"
 
 
 def fmt_distance_total(meters: int | None) -> str:
@@ -273,12 +271,12 @@ def fmt_time(seconds: int | None) -> str:
     return _join(f"{h}h" if h else "", f"{m}m" if m else "", f"{s}s" if s else "") or "0s"
 
 
-def fmt_value(kind: str, value, with_unit: bool = True) -> str:
-    """Wspólny format wartości: kind = weight | distance | reps | floors | time."""
+def fmt_value(kind: str, value, with_unit: bool = True, units: tuple[str, ...] = ()) -> str:
+    """Wspólny format wartości: kind = weight | distance | reps | floors | time; units = jednostki serii."""
     if kind == "weight":
-        return fmt_weight(value)
+        return fmt_weight(value, *units)
     if kind == "distance":
-        return fmt_distance(value)
+        return fmt_distance(value, *units)
     if kind == "time":
         return fmt_time(value)
     unit = "pięt." if kind == "floors" else "powt."
@@ -333,7 +331,8 @@ def first_value(load_type: str, st: WorkoutSet):
 
 def fmt_set_line(exercise: Exercise, st: WorkoutSet, number: int) -> str:
     """Krótka linia serii do widoku skondensowanego, np. „1. 20 kg × 10 powt.”."""
-    first = fmt_value(exercise.load_type, first_value(exercise.load_type, st))
+    units = _units_of(exercise.load_type, st)  # jednostki wybrane przy serii (kg/lbs, km/mile, m/ys)
+    first = fmt_value(exercise.load_type, first_value(exercise.load_type, st), units=units)
     if exercise.effort_type == "reps":
         return f"{number}. {first} × {fmt_value('reps', st.reps)}"
     return f"{number}. {first} — {fmt_value('time', st.duration_s)}"

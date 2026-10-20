@@ -3,11 +3,9 @@ from datetime import date, timedelta
 import flet as ft
 
 from .services import (
-    DIGIT_CHAR_PATTERN,
     EMPTY_SUMMARY,
     MONTH_NAMES,
     WEEKDAY_ABBR,
-    WEIGHT_CHAR_PATTERN,
     TrainingService,
     ValidationError,
     SummaryGroup,
@@ -712,7 +710,7 @@ class TrainBeastApp:
 
     def _num_field(self, value: str, *, weight: bool = False) -> ft.TextField:
         return ft.TextField(
-            input_filter=ft.InputFilter(regex_string=WEIGHT_CHAR_PATTERN if weight else DIGIT_CHAR_PATTERN, allow=True),
+            # bez input_filter: filtr Fleta/Fluttera blokuje skasowanie ostatniego znaku; znaki pilnuje field.data
             data=is_valid_weight_input if weight else is_valid_digits_input,
             value=value,
             keyboard_type=ft.KeyboardType.NUMBER,

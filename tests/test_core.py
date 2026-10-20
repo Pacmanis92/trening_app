@@ -471,7 +471,6 @@ def test_fresh_db_is_not_cleaned(db_url):
 
 # --- ograniczenia pól, ciężar, kalendarz ---
 from trainbeast.services import (  # noqa: E402
-    DIGIT_CHAR_PATTERN,
     MONTH_NAMES,
     fmt_decimal,
     is_valid_minsec_input,
@@ -510,11 +509,6 @@ def test_weight_rejected(text):
 def test_weight_input_allows_intermediate_states_but_not_second_separator():
     assert all(is_valid_weight_input(t) for t in ["", "2.", ".", ","])
     assert not is_valid_weight_input("2.5.") and not is_valid_weight_input("2.5,3")
-
-
-def test_integer_pattern_only_digits():
-    assert re.fullmatch(DIGIT_CHAR_PATTERN, "7")
-    assert not any(re.fullmatch(DIGIT_CHAR_PATTERN, c) for c in ".,- a")
 
 
 @pytest.mark.parametrize("call", [lambda: parse_reps("2.5"), lambda: parse_floors("-1"), lambda: parse_reps("")])
@@ -581,17 +575,6 @@ def test_distance_input_rejected(text):
     from trainbeast.services import is_valid_distance_input
 
     assert not is_valid_distance_input(text)
-
-
-def test_digit_char_pattern_only_digits():
-    import re
-
-    from trainbeast.services import DIGIT_CHAR_PATTERN
-
-    for ch in "0123456789":
-        assert re.fullmatch(DIGIT_CHAR_PATTERN, ch)
-    for bad in ["2.5", "2,5", "-3", "a", " ", "2.", ""]:
-        assert not re.fullmatch(DIGIT_CHAR_PATTERN + "+", bad)
 
 
 def test_calendar_today_only_in_shown_month():
@@ -992,3 +975,15 @@ def test_old_workout_tables_are_recreated_with_backup(tmp_path):
     assert {"unit", "unit_minor"} <= {c["name"] for c in inspect(make_engine(url)).get_columns("workout_set")}
     assert count(reopened, Workout) == 0 and len(reopened.list_exercises()) == exercises_before
     assert (tmp_path / "old.db.bak").is_file()
+
+
+def test_set_line_shows_unit_chosen_per_set(svc):
+    w, weight_set, distance_set = _weight_and_distance_sets(svc)
+    svc.set_set_unit(weight_set.id, "weight", "lbs")
+    svc.set_set_unit(distance_set.id, "distance", "mile")
+    svc.set_set_unit(distance_set.id, "distance_minor", "ys")
+    weight_we, distance_we = svc.get_workout(w.id).exercises
+    lines = [fmt_set_line(weight_we.exercise, st, i) for i, st in enumerate(weight_we.sets, 1)]
+    assert "80 lbs" in lines[0] and "kg" in lines[1]  # pierwsza seria w lbs, druga zostaje w kg
+    assert "mile" in fmt_set_line(distance_we.exercise, distance_we.sets[0], 1)
+    assert "ys" in fmt_set_line(distance_we.exercise, distance_we.sets[0], 1)
