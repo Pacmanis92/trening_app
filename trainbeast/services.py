@@ -14,7 +14,6 @@ LOAD_TYPES = ("weight", "distance", "reps", "floors")
 EFFORT_TYPES = ("reps", "time")
 
 EMPTY_SUMMARY = "Brak wykonanych serii"
-SUMMARY_SEP = "    "
 
 WR = ("weight", "reps")
 WT = ("weight", "time")
@@ -286,6 +285,43 @@ def fmt_value(kind: str, value, with_unit: bool = True) -> str:
     return f"{value or 0} {unit}" if with_unit else str(value or 0)
 
 
+# --- jednostki wybierane przy serii (tylko etykieta; liczby nie są przeliczane) ---
+UNIT_CHOICES = {
+    "weight": ("kg", "lbs"),
+    "distance": ("km", "mile"),
+    "distance_minor": ("m", "ys"),
+}
+UNIT_ATTRS = {"weight": "unit", "distance": "unit", "distance_minor": "unit_minor"}  # kolumna WorkoutSet
+UNIT_LOAD_TYPE = {"weight": "weight", "distance": "distance", "distance_minor": "distance"}
+
+
+def allowed_units(measure: str) -> tuple[str, ...]:
+    """Dozwolone jednostki miary: weight (kg/lbs), distance (km/mile), distance_minor (m/ys)."""
+    if measure not in UNIT_CHOICES:
+        raise ValidationError("Ta miara nie ma wybieranej jednostki.")
+    return UNIT_CHOICES[measure]
+
+
+def default_unit(measure: str) -> str:
+    """Jednostka bazowa miary (brak zapisanej jednostki = bazowa): kg, km, m."""
+    return allowed_units(measure)[0]
+
+
+def validate_unit(measure: str, unit: str | None) -> str:
+    """Zwraca jednostkę pasującą do miary; None = bazowa. Inną odrzuca (ValidationError)."""
+    if unit is None:
+        return default_unit(measure)
+    if unit not in allowed_units(measure):
+        raise ValidationError(f"Jednostka „{unit}” nie pasuje do tej miary.")
+    return unit
+
+
+def set_unit_of(st: WorkoutSet, measure: str) -> str:
+    """Jednostka serii dla miary (na pobranym obiekcie); brak wartości = bazowa."""
+    validate_unit(measure, None)  # sprawdza nazwę miary
+    return validate_unit(measure, getattr(st, UNIT_ATTRS[measure]))
+
+
 def first_value(load_type: str, st: WorkoutSet):
     """Wartość pierwszej osi serii; Powtórzenia i Piętra są zapisywane w polu reps."""
     if load_type == "weight":
@@ -303,17 +339,43 @@ def fmt_set_line(exercise: Exercise, st: WorkoutSet, number: int) -> str:
     return f"{number}. {first} — {fmt_value('time', st.duration_s)}"
 
 
-FIRST_LABELS = {"weight": "Ciężar", "distance": "Dystans", "reps": "Powtórzenia", "floors": "Piętra"}
 TOTAL_LABELS = {"reps": "Łączne powtórzenia", "floors": "Łączne piętra"}
 
 
-def summarize_exercise(exercise: Exercise, sets) -> list[str]:
-    """Podsumowanie wykonanych serii (linie tekstu); serie niewykonane są pomijane."""
-    done = [st for st in sets if st.done]
-    if not done:
-        return [EMPTY_SUMMARY]
+class SummaryGroup(NamedTuple):
+    heading: str  # jednostki grupy (np. „lbs”, „km / m”); pusty, gdy wszystkie serie mają tę samą jednostkę
+    lines: list[str]
+
+
+def _fmt_weight_total(value: float, unit: str) -> str:
+    return f"{fmt_decimal(value)} {unit}"
+
+
+def _fmt_distance_total_units(meters: int, unit: str, unit_minor: str) -> str:
+    km, m = divmod(meters or 0, 1000)
+    return _join(f"{km} {unit}" if km else "", f"{m} {unit_minor}" if m else "") or f"0 {unit_minor}"
+
+
+def _units_of(kind: str, st: WorkoutSet) -> tuple[str, ...]:
+    """Jednostki serii istotne dla typu obciążenia (liczby nie są przeliczane, więc grupują sumy)."""
+    if kind == "weight":
+        return (validate_unit("weight", getattr(st, "unit", None)),)
+    if kind == "distance":
+        return (
+            validate_unit("distance", getattr(st, "unit", None)),
+            validate_unit("distance_minor", getattr(st, "unit_minor", None)),
+        )
+    return ()
+
+
+def summarize_exercise(exercise: Exercise, sets) -> list[SummaryGroup]:
+    """Wyniki łączne wykonanych serii, osobno dla każdej jednostki; brak wykonanych serii -> pusta lista."""
     kind = exercise.load_type
     by_reps = exercise.effort_type == "reps"
+    by_units: dict[tuple[str, ...], list[WorkoutSet]] = {}
+    for st in sets:
+        if st.done:
+            by_units.setdefault(_units_of(kind, st), []).append(st)
 
     def first(st) -> float | int:
         return first_value(kind, st)
@@ -321,33 +383,25 @@ def summarize_exercise(exercise: Exercise, sets) -> list[str]:
     def second(st) -> int:
         return (st.reps or 0) if by_reps else (st.duration_s or 0)
 
-    groups: dict[float | int, int] = {}
-    for st in done:
-        groups[first(st)] = groups.get(first(st), 0) + second(st)
-
-    lines = []
-    for key in sorted(groups):
-        head = f"{FIRST_LABELS[kind]}: {fmt_value(kind, key, with_unit=kind in ('weight', 'distance'))}"
-        tail = (
-            f"Powtórzenia: {fmt_value('reps', groups[key], with_unit=False)}"
-            if by_reps
-            else f"Czas: {fmt_value('time', groups[key])}"
-        )
-        lines.append(f"{head}{SUMMARY_SEP}{tail}")
-
-    if kind == "weight" and by_reps:
-        lines.append(f"Suma przewalonego żelastwa: {fmt_weight(sum(first(st) * second(st) for st in done))}")
-    elif kind == "weight":
-        lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
-    elif kind == "distance" and by_reps:
-        lines.append(f"Łączny dystans: {fmt_distance_total(sum(first(st) * second(st) for st in done))}")
-    else:
-        if kind == "distance":
-            lines.append(f"Łączny dystans: {fmt_distance_total(sum(first(st) for st in done))}")
+    groups = []
+    for units in sorted(by_units):
+        done = by_units[units]
+        if kind == "weight" and by_reps:
+            lines = [f"Suma przewalonego żelastwa: {_fmt_weight_total(sum(first(st) * second(st) for st in done), *units)}"]
+        elif kind == "weight":
+            lines = [f"Łączny czas: {fmt_time(sum(second(st) for st in done))}"]
+        elif kind == "distance" and by_reps:
+            lines = [f"Łączny dystans: {_fmt_distance_total_units(sum(first(st) * second(st) for st in done), *units)}"]
         else:
-            lines.append(f"{TOTAL_LABELS[kind]}: {sum(first(st) for st in done)}")
-        lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
-    return lines
+            if kind == "distance":
+                lines = [f"Łączny dystans: {_fmt_distance_total_units(sum(first(st) for st in done), *units)}"]
+            else:
+                lines = [f"{TOTAL_LABELS[kind]}: {sum(first(st) for st in done)}"]
+            lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
+        groups.append(SummaryGroup(" / ".join(units), lines))
+    if len(groups) == 1:
+        groups[0] = SummaryGroup("", groups[0].lines)
+    return groups
 
 
 # --- kalendarz ---
@@ -399,6 +453,8 @@ class SetSnapshot:
     distance_m: int | None
     reps: int | None
     duration_s: int | None
+    unit: str | None = None
+    unit_minor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -565,12 +621,12 @@ class TrainingService:
             )
 
     def get_last_workout(self, today: date | None = None) -> Workout | None:
-        """Najnowszy trening z datą nie późniejszą niż dziś, który ma co najmniej jedno ćwiczenie."""
+        """Najnowszy trening z datą ściśle wcześniejszą niż dziś, który ma co najmniej jedno ćwiczenie."""
         with self._sf() as s:
             return s.scalars(
                 _workout_query()
                 .where(
-                    Workout.workout_date <= (today or date.today()),
+                    Workout.workout_date < (today or date.today()),
                     Workout.exercises.any(),
                 )
                 .order_by(Workout.workout_date.desc())
@@ -591,7 +647,10 @@ class TrainingService:
                 ExerciseSnapshot(
                     exercise_id=we.exercise_id,
                     sets=tuple(
-                        SetSnapshot(st.weight_kg, st.distance_m, st.reps, st.duration_s) for st in we.sets
+                        SetSnapshot(
+                            st.weight_kg, st.distance_m, st.reps, st.duration_s, st.unit, st.unit_minor
+                        )
+                        for st in we.sets
                     ),
                 )
                 for we in workout.exercises
@@ -623,6 +682,8 @@ class TrainingService:
                                     distance_m=st.distance_m,
                                     reps=st.reps,
                                     duration_s=st.duration_s,
+                                    unit=st.unit,
+                                    unit_minor=st.unit_minor,
                                     done=False,
                                 )
                                 for i, st in enumerate(ex.sets)
@@ -700,6 +761,7 @@ class TrainingService:
             if last:
                 new.weight_kg, new.distance_m = last.weight_kg, last.distance_m
                 new.reps, new.duration_s = last.reps, last.duration_s
+                new.unit, new.unit_minor = last.unit, last.unit_minor
             s.add(new)
         return new
 
@@ -734,6 +796,26 @@ class TrainingService:
                 ws.done = done
         return ws
 
+    def set_set_unit(self, set_id: int, measure: str, unit: str) -> WorkoutSet:
+        """Zapisuje jednostkę serii (bez przeliczania wartości); odrzuca jednostkę niepasującą do miary."""
+        unit = validate_unit(measure, unit)
+        with self._sf.begin() as s:
+            ws = s.get(WorkoutSet, set_id)
+            if ws is None:
+                raise ValidationError("Nie ma takiej serii.")
+            if ws.workout_exercise.exercise.load_type != UNIT_LOAD_TYPE[measure]:
+                raise ValidationError("Ta seria nie ma tej miary.")
+            setattr(ws, UNIT_ATTRS[measure], unit)
+        return ws
+
+    def get_set_unit(self, set_id: int, measure: str) -> str:
+        """Odczyt jednostki serii dla miary; brak zapisanej = bazowa."""
+        with self._sf() as s:
+            ws = s.get(WorkoutSet, set_id)
+            if ws is None:
+                raise ValidationError("Nie ma takiej serii.")
+            return set_unit_of(ws, measure)
+
     def remove_set(self, set_id: int) -> None:
         with self._sf.begin() as s:
             ws = s.get(WorkoutSet, set_id)
@@ -742,5 +824,10 @@ class TrainingService:
 
 
 # --- pomocnicze (na pobranych, odłączonych obiektach) ---
+def has_snapshot_to_paste(snapshot: WorkoutSnapshot | None) -> bool:
+    """Czy w pamięci jest skopiowany trening, który można wkleić."""
+    return snapshot is not None
+
+
 def done_sets_count(workout: Workout) -> int:
     return sum(1 for we in workout.exercises for st in we.sets if st.done)

@@ -1,11 +1,13 @@
 import os
+import shutil
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Exercise
+from .models import Base, Exercise, Workout, WorkoutExercise, WorkoutSet
 
 DB_FILENAME = "trainbeast.db"
 
@@ -29,6 +31,7 @@ def make_engine(url: str | None = None) -> Engine:
         cursor.close()
 
     _migrate_exercise_category(engine)
+    _reset_workout_tables_for_units(engine)
     Base.metadata.create_all(engine)
     return engine
 
@@ -47,6 +50,33 @@ def _migrate_exercise_category(engine: Engine) -> None:
         for table in ("workout_set", "workout_exercise", "workout", "exercise"):
             conn.execute(text(f"DELETE FROM {table}"))
     Exercise.__table__.drop(engine)  # create_all odtworzy ją z kolumną category
+
+
+def _backup_path(db_file: Path) -> Path:
+    backup = db_file.with_name(db_file.name + ".bak")
+    if backup.exists():  # nie nadpisuje wcześniejszej kopii
+        backup = db_file.with_name(f"{db_file.name}.{datetime.now():%Y%m%d%H%M%S}.bak")
+    return backup
+
+
+def _reset_workout_tables_for_units(engine: Engine) -> None:
+    """Jednorazowo: gdy workout_set nie ma kolumn jednostek, robi kopię pliku bazy (.bak obok oryginału),
+    po czym usuwa i odtwarza tylko tabele treningów i serii (bez migracji). Ćwiczenia i kategorie zostają.
+
+    Na świeżej bazie (brak tabeli workout_set) i po zmianie schematu nic nie robi.
+    """
+    inspector = inspect(engine)
+    if not inspector.has_table("workout_set"):
+        return
+    if {"unit", "unit_minor"} <= {c["name"] for c in inspector.get_columns("workout_set")}:
+        return
+    db_file = engine.url.database
+    if db_file and db_file != ":memory:" and Path(db_file).is_file():
+        engine.dispose()  # zamyka połączenia, żeby kopia była spójna
+        shutil.copy2(db_file, _backup_path(Path(db_file)))
+    Base.metadata.drop_all(
+        engine, tables=[WorkoutSet.__table__, WorkoutExercise.__table__, Workout.__table__]
+    )  # create_all odtworzy je z nowym schematem
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:

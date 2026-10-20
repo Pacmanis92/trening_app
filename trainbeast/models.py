@@ -83,5 +83,9 @@ class WorkoutSet(Base):
     reps: Mapped[int | None] = mapped_column(Integer, default=None)
     duration_s: Mapped[int | None] = mapped_column(Integer, default=None)
     done: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Jednostka wybrana przy serii (tylko etykieta - wartości zostają w jednostkach bazowych, bez przeliczania).
+    # NULL = jednostka bazowa: kg / km / m.
+    unit: Mapped[str | None] = mapped_column(String(5), default=None)  # kg | lbs | km | mile
+    unit_minor: Mapped[str | None] = mapped_column(String(5), default=None)  # m | ys (dystans)
 
     workout_exercise: Mapped[WorkoutExercise] = relationship(back_populates="sets")

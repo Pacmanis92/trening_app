@@ -6,13 +6,15 @@ from .services import (
     DIGIT_CHAR_PATTERN,
     EMPTY_SUMMARY,
     MONTH_NAMES,
-    SUMMARY_SEP,
     WEEKDAY_ABBR,
     WEIGHT_CHAR_PATTERN,
     TrainingService,
     ValidationError,
+    SummaryGroup,
     WorkoutSnapshot,
+    allowed_units,
     done_sets_count,
+    has_snapshot_to_paste,
     fmt_decimal,
     fmt_set_line,
     interpret_swipe,
@@ -28,6 +30,7 @@ from .services import (
     parse_floors,
     parse_reps,
     parse_weight,
+    set_unit_of,
     shift_month,
     summarize_exercise,
     weekday_abbr,
@@ -35,6 +38,15 @@ from .services import (
 
 BTN_HEIGHT = 60
 FIELD_HEIGHT = 60
+EXERCISE_NAME_SIZE = 18  # nazwa ćwiczenia: ten sam rozmiar w trybie edycji i nieedytowalnym
+SET_TEXT_LINE = 24  # wysokość linii wartości (czcionka 16); odstęp tekstu od krawędzi = (wysokość pola - linia) / 2
+SET_FIELD_V_GAP_OLD = (44 - SET_TEXT_LINE) / 2  # dawny odstęp (pole miało 44 px) = 10
+SET_FIELD_V_GAP = SET_FIELD_V_GAP_OLD / 2  # o 50% mniejszy odstęp tekstu od górnej i dolnej krawędzi = 5
+SET_FIELD_HEIGHT = int(SET_TEXT_LINE + 2 * SET_FIELD_V_GAP)  # wspólna wysokość wszystkich pól miar = 34
+SET_LABEL_SIZE = 11  # etykieta jednostki na górnej krawędzi pola
+LABEL_OVERHANG = 8  # tyle etykieta wystaje nad ramkę pola (jej środek leży na krawędzi)
+SET_ROW_HEIGHT = SET_FIELD_HEIGHT + LABEL_OVERHANG
+NAME_ROW_HEIGHT = 60 * 0.6  # pole „Nazwa treningu" i przycisk „Kopiuj": jedna wspólna wysokość
 CAL_TEXT = "#222222"
 CAL_SAT = ft.Colors.GREY_600
 CAL_SUN = ft.Colors.RED_600
@@ -52,8 +64,14 @@ DAY_BAR_V_PAD = 3  # odstęp góra/dół między ramką paska a zakładkami
 DAY_ABBR_SIZE = 10
 DAY_BAR_RADIUS = (DAY_TAB_HEIGHT + 2 * DAY_BAR_V_PAD + 2) / 2  # pigułka: połowa wysokości paska z ramką (40)
 LINK_HEIGHT = 22  # „Wróć do dzisiaj": wysokość pola linku (dawniej ok. 48 z domyślnym polem dotyku)
+ACTION_BLUE = ft.Colors.PRIMARY  # niebieski „Zakończ" (kolor główny motywu); też daszek
 BTN_FILL = ft.Colors.with_opacity(0.25, ACCENT)  # półprzezroczyste żółte wypełnienie przycisków
 ACCENT_DARK = "#584003"  # ciemny odcień żółtego ramek (ACCENT * 0,35): wypełnienie „+ Dodaj ćwiczenie" i „Kopiuj"
+DONE_ICON_SIZE = 22  # wskaźnik wykonania serii: wspólny dla widoku edycji i nieedytowalnego
+DONE_ICON_PAD = 6
+UNIT_MENU_WIDTH = 112  # minimalna szerokość menu Material; linia rozdzielająca ma całą szerokość
+EDIT_BTN_HEIGHT = 40  # „+ Dodaj serię" i „Zakończ" w karcie edycji
+EDIT_BTN_GAP = 12  # dodatkowy odstęp między ostatnią serią a wierszem przycisków
 HEADER_BTN_HEIGHT = 48  # wysokość ikony kalendarza (32 + 2 * 8); „Donate" ma tę samą
 HEADER_BTN_RADIUS = 10  # zaokrąglenie ikony kalendarza i „Donate"
 HEADER_BTN_BORDER = ft.BorderSide(1, ACCENT)  # ramka ikony kalendarza i „Donate"
@@ -113,6 +131,15 @@ def big_button(text: str, on_click, primary: bool = True, outlined: bool = False
     if outlined:
         kwargs["style"] = outline_style()
     return cls(text, on_click=on_click, height=BTN_HEIGHT, expand=kwargs.pop("expand", None), **kwargs)
+
+
+def done_icon(done: bool) -> ft.Icon:
+    """Wskaźnik wykonania serii (żółte kółko z ptaszkiem / puste kółko): wspólny dla edycji i widoku nieedytowalnego."""
+    return ft.Icon(
+        ft.Icons.CHECK_CIRCLE if done else ft.Icons.RADIO_BUTTON_UNCHECKED,
+        size=DONE_ICON_SIZE,
+        color=ACCENT if done else ft.Colors.OUTLINE,
+    )
 
 
 def swipeable(content: ft.Control, on_step) -> ft.GestureDetector:
@@ -445,16 +472,35 @@ class TrainBeastApp:
                 ),
             ]
         self.workout_id = workout.id
+        # Flet nie wymusza wysokości ramki TextField (rysuje ją wg treści), więc ramkę i tło daje Container
+        # o wysokości NAME_ROW_HEIGHT - tej samej co „Kopiuj"; wewnątrz pole bez ramki, wyśrodkowane pionowo.
         name_field = ft.TextField(
             hint_text="Nazwa treningu (opcjonalnie)",
             value=workout.name,
-            height=FIELD_HEIGHT,
-            border_radius=CARD_RADIUS,
-            bgcolor=FILL_DARK,
-            border_color=ACCENT,
-            focused_border_color=ACCENT,
-            expand=True,
+            border=ft.InputBorder.NONE,
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=0),
+            height=NAME_ROW_HEIGHT - 2,
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
+        )
+        name_box = ft.Container(
+            name_field,
+            height=NAME_ROW_HEIGHT,
+            expand=True,
+            alignment=ft.Alignment.CENTER_LEFT,
+            bgcolor=FILL_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=CARD_RADIUS,
+        )
+        copy_button = ft.Container(  # Container zamiast przycisku Flet: ten ma minimalną wysokość i nie da się go zrównać z polem
+            ft.Text("Kopiuj", color=ft.Colors.WHITE),
+            height=NAME_ROW_HEIGHT,
+            padding=ft.Padding.symmetric(horizontal=12),
+            alignment=ft.Alignment.CENTER,
+            bgcolor=ACCENT_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=CARD_RADIUS,
+            ink=True,
+            on_click=self._copy_workout,
         )
         self.cards_column = ft.Column(spacing=12)
         for we in workout.exercises:
@@ -463,15 +509,11 @@ class TrainBeastApp:
         return [
             ft.Row(
                 [
-                    name_field,
-                    ft.Button(
-                        "Kopiuj",
-                        on_click=self._copy_workout,
-                        height=FIELD_HEIGHT,
-                        style=add_exercise_style(padding=ft.Padding.symmetric(horizontal=12)),
-                    ),
+                    name_box,
+                    copy_button,
                 ],
                 spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             self.cards_column,
             ft.Row(
@@ -498,7 +540,8 @@ class TrainBeastApp:
         self._toast("Trening skopiowany")
 
     def _paste_workout(self, e=None) -> None:
-        if self.snapshot is None:
+        if not has_snapshot_to_paste(self.snapshot):
+            self._toast("Brak skopiowanych treningów")
             return
         self.service.paste_snapshot(self.snapshot, self.selected)
         self.render()
@@ -527,9 +570,11 @@ class TrainBeastApp:
     def _fill_card(self, card: ft.Container, we) -> None:
         if we.id in self.expanded:
             card.content = self._edit_content(we)
+            card.padding = 8
             card.on_click = None
         else:
             card.content = self._collapsed_content(we)
+            card.padding = 12
             card.on_click = lambda e, we_id=we.id: self._set_editing(we_id, True)
 
     def _set_editing(self, we_id: int, editing: bool) -> None:
@@ -541,48 +586,55 @@ class TrainBeastApp:
 
     def _edit_content(self, we) -> ft.Control:
         rows: list[ft.Control] = [
+            ft.Container(
+                ft.Text(we.exercise.name, size=EXERCISE_NAME_SIZE, weight=ft.FontWeight.BOLD),
+                on_click=lambda e, we=we: self._finish_exercise(we),
+            ),
+        ]
+        for i, st in enumerate(we.sets, start=1):
+            rows.append(self._set_row(we.id, we.exercise, i, st))
+        rows.append(ft.Container(height=EDIT_BTN_GAP))
+        rows.append(
             ft.Row(
                 [
-                    ft.Container(
-                        ft.Text(we.exercise.name, size=20, weight=ft.FontWeight.BOLD),
-                        expand=True,
-                        on_click=lambda e, we=we: self._finish_exercise(we),
-                    ),
                     ft.IconButton(
                         ft.Icons.DELETE,
                         tooltip="Usuń ćwiczenie",
                         icon_size=30,
                         on_click=lambda e, we_id=we.id, name=we.exercise.name: self._confirm_remove_exercise(we_id, name),
                     ),
-                ]
-            ),
-        ]
-        for i, st in enumerate(we.sets, start=1):
-            rows.append(self._set_row(we.id, we.exercise, i, st))
-        rows.append(
-            ft.Row(
-                [
-                    big_button("+ Dodaj serię", lambda e, we_id=we.id: self._add_set(we_id), primary=False, expand=1),
-                    big_button("Zakończ", lambda e, we=we: self._finish_exercise(we), expand=1),
+                    ft.Button(
+                        "+ Dodaj serię",
+                        height=EDIT_BTN_HEIGHT,
+                        expand=1,
+                        style=ft.ButtonStyle(
+                            bgcolor=FILL_DARK, color=ACCENT, shape=ft.RoundedRectangleBorder(radius=EDIT_BTN_HEIGHT / 2)
+                        ),
+                        on_click=lambda e, we_id=we.id: self._add_set(we_id),
+                    ),
+                    ft.FilledButton(
+                        "Zakończ",
+                        height=EDIT_BTN_HEIGHT,
+                        expand=1,
+                        style=ft.ButtonStyle(bgcolor=ACTION_BLUE, shape=ft.RoundedRectangleBorder(radius=EDIT_BTN_HEIGHT / 2)),
+                        on_click=lambda e, we=we: self._finish_exercise(we),
+                    ),
                 ],
                 spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
-        return ft.Column(rows, spacing=8)
+        return ft.Column(rows, spacing=4)
 
     def _collapsed_content(self, we) -> ft.Control:
-        rows: list[ft.Control] = [ft.Text(we.exercise.name, size=18, weight=ft.FontWeight.BOLD)]
+        rows: list[ft.Control] = [ft.Text(we.exercise.name, size=EXERCISE_NAME_SIZE, weight=ft.FontWeight.BOLD)]
         for i, st in enumerate(we.sets, start=1):
             rows.append(
                 ft.Row(
                     [
                         ft.Container(
-                            ft.Icon(
-                                ft.Icons.CHECK_CIRCLE if st.done else ft.Icons.RADIO_BUTTON_UNCHECKED,
-                                size=22,
-                                color=ACCENT if st.done else ft.Colors.OUTLINE,
-                            ),
-                            padding=ft.Padding.all(6),
+                            done_icon(st.done),
+                            padding=ft.Padding.all(DONE_ICON_PAD),
                             on_click=lambda e, we_id=we.id, sid=st.id, value=not st.done: self._toggle_done_card(we_id, sid, value),
                         ),
                         ft.Text(
@@ -626,11 +678,11 @@ class TrainBeastApp:
         we = self._get_we(we_id)
         if we is None:
             return
-        lines = summarize_exercise(we.exercise, we.sets)
+        groups = summarize_exercise(we.exercise, we.sets)
         self._dialog(
             "Podsumowanie ćwiczenia",
             ft.Column(
-                [ft.Text(we.exercise.name, size=18, weight=ft.FontWeight.BOLD), *self._summary_controls(lines)],
+                [ft.Text(we.exercise.name, size=EXERCISE_NAME_SIZE, weight=ft.FontWeight.BOLD), *self._summary_controls(groups)],
                 tight=True,
                 spacing=6,
             ),
@@ -638,25 +690,22 @@ class TrainBeastApp:
         )
 
     @staticmethod
-    def _summary_controls(lines: list[str]) -> list[ft.Control]:
-        if lines == [EMPTY_SUMMARY]:
+    def _summary_controls(groups: list[SummaryGroup]) -> list[ft.Control]:
+        if not groups:
             return [
                 ft.Text(EMPTY_SUMMARY, size=16),
                 ft.Text(
                     "Czy na pewno oznaczyłeś serie jako wykonane? "
-                    "Zaznacz checkbox przy każdej serii na karcie ćwiczenia.",
+                    "Naciśnij „wyk” przy każdej serii na karcie ćwiczenia.",
                     size=12,
                     opacity=0.6,
                 ),
             ]
         controls: list[ft.Control] = []
-        for line in lines:
-            if SUMMARY_SEP in line:  # wiersz grupy: dwa pola obok siebie, zawijane parami
-                controls.append(
-                    ft.Row([ft.Text(part, size=16) for part in line.split(SUMMARY_SEP)], wrap=True, spacing=16, run_spacing=2)
-                )
-            else:
-                controls.append(ft.Text(line, size=16))
+        for group in groups:
+            if group.heading:  # kilka jednostek: nagłówek z jednostką nad wynikami grupy
+                controls.append(ft.Text(group.heading, size=14, weight=ft.FontWeight.BOLD, color=ACCENT))
+            controls.extend(ft.Text(line, size=16) for line in group.lines)
         return controls
 
     # --- wiersz serii ---
@@ -664,44 +713,122 @@ class TrainBeastApp:
     def _has_error(field: ft.TextField) -> bool:
         return field.border_color == ft.Colors.ERROR
 
-    def _num_field(
-        self, value: str, *, label: str | None = None, suffix: str | None = None, expand: int = 1, weight: bool = False
-    ) -> ft.TextField:
+    def _num_field(self, value: str, *, weight: bool = False) -> ft.TextField:
         return ft.TextField(
             input_filter=ft.InputFilter(regex_string=WEIGHT_CHAR_PATTERN if weight else DIGIT_CHAR_PATTERN, allow=True),
             data=is_valid_weight_input if weight else is_valid_digits_input,
             value=value,
-            label=label,
-            suffix=suffix,
             keyboard_type=ft.KeyboardType.NUMBER,
-            height=FIELD_HEIGHT,
-            expand=expand,
+            height=SET_FIELD_HEIGHT,
+            text_size=16,
             text_align=ft.TextAlign.CENTER,
-            content_padding=ft.Padding.symmetric(horizontal=6, vertical=8),
+            content_padding=ft.Padding.symmetric(horizontal=6, vertical=SET_FIELD_V_GAP),
         )
+
+    @staticmethod
+    def _boxed(content: ft.Control, label: ft.Control, *, expand: int | None = None, width: int | None = None) -> ft.Control:
+        """Kontrolka z etykietą na górnej krawędzi ramki (etykieta ma tło karty, więc „przecina" ramkę)."""
+        return ft.Container(
+            ft.Stack([ft.Container(content, padding=ft.Padding.only(top=LABEL_OVERHANG)), label]),
+            expand=expand,
+            width=width,
+            height=SET_ROW_HEIGHT,
+        )
+
+    @staticmethod
+    def _plain_label(text: str) -> ft.Control:
+        return ft.Container(
+            ft.Text(text, size=SET_LABEL_SIZE, color=ft.Colors.ON_SURFACE_VARIANT),
+            bgcolor=FILL_DARK,
+            padding=ft.Padding.symmetric(horizontal=3),
+            left=8,
+            top=0,
+        )
+
+    @staticmethod
+    def _unit_menu_items(measure: str, choose) -> list[ft.PopupMenuItem]:
+        """Pozycje listy jednostek rozdzielone żółtymi liniami (bez linii nad pierwszą i pod ostatnią)."""
+        items: list[ft.PopupMenuItem] = []
+        for u in allowed_units(measure):
+            if items:
+                items.append(
+                    ft.PopupMenuItem(content=ft.Container(height=1, width=UNIT_MENU_WIDTH, bgcolor=ACCENT), height=1, padding=0)
+                )
+            items.append(ft.PopupMenuItem(content=ft.Text(u), on_click=lambda e, u=u: choose(u)))
+        return items
+
+    def _unit_label(self, set_id: int, measure: str, unit: str) -> ft.Control:
+        """Klikalna etykieta jednostki z niebieskim daszkiem; lista zmienia tylko jednostkę serii (bez przeliczania)."""
+        text = ft.Text(unit, size=SET_LABEL_SIZE, color=ft.Colors.ON_SURFACE_VARIANT)
+
+        def choose(choice: str) -> None:
+            try:
+                self.service.set_set_unit(set_id, measure, choice)
+            except ValidationError as err:
+                self._toast(str(err))
+                return
+            text.value = choice
+            text.update()
+
+        return ft.PopupMenuButton(
+            content=ft.Container(
+                ft.Row([text, ft.Icon(ft.Icons.ARROW_DROP_UP, size=14, color=ACTION_BLUE)], spacing=0, tight=True),
+                bgcolor=FILL_DARK,
+                padding=ft.Padding.symmetric(horizontal=3),
+            ),
+            items=self._unit_menu_items(measure, choose),
+            bgcolor=FILL_DARK,
+            shape=ft.RoundedRectangleBorder(side=ft.BorderSide(1, ACCENT), radius=CARD_RADIUS),
+            padding=0,
+            left=8,
+            top=0,
+        )
+
+    def _done_button(self, set_id: int, done: bool) -> ft.Control:
+        """Okrągłe „wyk": ten sam wskaźnik co w widoku nieedytowalnym (żółte kółko z ptaszkiem / puste kółko)."""
+        state = {"done": done}
+        button = ft.Container(
+            done_icon(done),
+            width=SET_FIELD_HEIGHT,
+            height=SET_FIELD_HEIGHT,
+            alignment=ft.Alignment.CENTER,
+        )
+
+        def toggle(e) -> None:
+            state["done"] = not state["done"]
+            button.content = done_icon(state["done"])
+            button.update()
+            self._toggle_done(set_id, state["done"])
+
+        button.on_click = toggle
+        return self._boxed(button, self._plain_label("wyk"), width=SET_FIELD_HEIGHT)
 
     def _set_row(self, we_id: int, exercise, number: int, st) -> ft.Control:
         first_kind = exercise.load_type
         if first_kind == "weight":
-            first = [self._num_field(fmt_decimal(st.weight_kg), suffix="kg", expand=2, weight=True)]
-        elif first_kind == "reps":
-            first = [self._num_field(str(st.reps or 0), suffix="powt.", expand=2)]
-        elif first_kind == "floors":
-            first = [self._num_field(str(st.reps or 0), suffix="pięt.", expand=2)]
+            first = [self._num_field(fmt_decimal(st.weight_kg), weight=True)]
+            first_boxed = [self._boxed(first[0], self._unit_label(st.id, "weight", set_unit_of(st, "weight")), expand=1)]
+        elif first_kind in ("reps", "floors"):
+            first = [self._num_field(str(st.reps or 0))]
+            first_boxed = [self._boxed(first[0], self._plain_label("powt" if first_kind == "reps" else "pięt"), expand=1)]
         else:
             km, m = divmod(st.distance_m or 0, 1000)
-            first = [self._num_field(str(km), label="km"), self._num_field(str(m), label="m")]
+            first = [self._num_field(str(km)), self._num_field(str(m))]
+            first_boxed = [
+                self._boxed(first[0], self._unit_label(st.id, "distance", set_unit_of(st, "distance")), expand=1),
+                self._boxed(first[1], self._unit_label(st.id, "distance_minor", set_unit_of(st, "distance_minor")), expand=1),
+            ]
         if exercise.effort_type == "reps":
             second_kind = "reps"
-            second = [self._num_field(str(st.reps or 0), suffix="powt.", expand=2)]
+            second = [self._num_field(str(st.reps or 0))]
+            second_boxed = [self._boxed(second[0], self._plain_label("powt"), expand=1)]
         else:
             second_kind = "time"
             h, rest = divmod(st.duration_s or 0, 3600)
             mi, s = divmod(rest, 60)
-            second = [
-                self._num_field(str(h), label="h"),
-                self._num_field(str(mi), label="min"),
-                self._num_field(str(s), label="s"),
+            second = [self._num_field(str(h)), self._num_field(str(mi)), self._num_field(str(s))]
+            second_boxed = [
+                self._boxed(f, self._plain_label(name), expand=1) for f, name in zip(second, ("h", "min", "s"))
             ]
         self.set_fields[st.id] = first + second
         self.set_groups[st.id] = [(first_kind, first), (second_kind, second)]
@@ -716,27 +843,39 @@ class TrainBeastApp:
                 f.on_change = self._guarded_change(f, lambda e, sid=st.id, k=kind, g=group: self._save_group(sid, k, g))
                 f.on_blur = f.on_submit = lambda e, k=kind, g=group: self._on_blur(k, g)
 
-        done = ft.Checkbox(value=st.done, scale=1.4)
-        done.on_change = lambda e, sid=st.id: self._toggle_done(sid, bool(done.value))
+        def side(content: ft.Control, width: int) -> ft.Control:  # numer i X: wyrównane do środka pola, nie etykiety
+            return ft.Container(
+                content,
+                width=width,
+                height=SET_ROW_HEIGHT,
+                padding=ft.Padding.only(top=LABEL_OVERHANG),
+                alignment=ft.Alignment.CENTER,
+            )
 
-        header = ft.Row(
-            [
-                ft.Text(f"{number}.", size=18, weight=ft.FontWeight.BOLD, expand=True),
-                ft.Text("wykonana", size=12),
-                done,
-                ft.IconButton(
-                    ft.Icons.CLOSE,
-                    tooltip="Usuń serię",
-                    on_click=lambda e, sid=st.id: self._remove_set(we_id, sid),
-                ),
-            ],
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        number_text = side(ft.Text(f"{number}.", size=16, weight=ft.FontWeight.BOLD), 28)
+        remove_btn = side(
+            ft.IconButton(
+                ft.Icons.CLOSE,
+                tooltip="Usuń serię",
+                icon_size=20,
+                style=ft.ButtonStyle(padding=0),
+                width=40,
+                height=SET_FIELD_HEIGHT,
+                on_click=lambda e, sid=st.id: self._remove_set(we_id, sid),
+            ),
+            40,
         )
+        done = self._done_button(st.id, st.done)
+
+        def line(fields: list[ft.Control], first_line: bool) -> ft.Row:
+            items = [number_text, *fields, done, remove_btn] if first_line else fields
+            return ft.Row(items, spacing=4, vertical_alignment=ft.CrossAxisAlignment.START)
+
         if len(first) == 1 and len(second) == 1:
-            quantities = [ft.Row(first + second)]
+            quantities = [line(first_boxed + second_boxed, True)]
         else:
-            quantities = [ft.Row(first), ft.Row(second)]
-        return ft.Column([header, *quantities], spacing=4)
+            quantities = [line(first_boxed, True), line(second_boxed, False)]
+        return ft.Column(quantities, spacing=0)
 
     @staticmethod
     def _guarded_change(field: ft.TextField, handler):

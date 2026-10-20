@@ -11,8 +11,14 @@ from trainbeast.services import (
     STARTER_EXERCISES,
     TrainingService,
     ValidationError,
+    allowed_units,
+    default_unit,
+    set_unit_of,
+    validate_unit,
     done_sets_count,
+    WorkoutSnapshot,
     fmt_value,
+    has_snapshot_to_paste,
     parse_distance,
     parse_duration,
     fmt_set_line,
@@ -155,39 +161,40 @@ class _Ex:
 
 
 class _St:
-    def __init__(self, first=0, second=0, done=True, load="weight", effort="reps"):
+    def __init__(self, first=0, second=0, done=True, load="weight", effort="reps", unit=None, unit_minor=None):
         self.weight_kg = first if load == "weight" else None
         self.distance_m = first if load == "distance" else None
         self.reps = second if effort == "reps" else None
         self.duration_s = second if effort == "time" else None
         self.done = done
+        self.unit, self.unit_minor = unit, unit_minor
 
 
-def test_summary_weight_reps_example():
+def _lines(ex, sets):
+    return [(g.heading, g.lines) for g in summarize_exercise(ex, sets)]
+
+
+def test_summary_weight_reps_single_unit_is_one_total():
     sets = [_St(20, 10), _St(30, 10), _St(30, 10), _St(40, 10), _St(100, 10, done=False)]
-    assert summarize_exercise(_Ex("weight", "reps"), sets) == [
-        "Ciężar: 20 kg    Powtórzenia: 10",
-        "Ciężar: 30 kg    Powtórzenia: 20",
-        "Ciężar: 40 kg    Powtórzenia: 10",
-        "Suma przewalonego żelastwa: 1200 kg",
+    assert _lines(_Ex("weight", "reps"), sets) == [("", ["Suma przewalonego żelastwa: 1200 kg"])]
+
+
+def test_summary_weight_reps_kg_and_lbs_are_separate_without_conversion():
+    sets = [_St(20, 10), _St(30, 10, unit="lbs"), _St(10, 5, unit="lbs"), _St(5, 1, unit="kg")]
+    assert _lines(_Ex("weight", "reps"), sets) == [
+        ("kg", ["Suma przewalonego żelastwa: 205 kg"]),
+        ("lbs", ["Suma przewalonego żelastwa: 350 lbs"]),
     ]
 
 
 def test_summary_weight_time():
     sets = [_St(20, 90, effort="time"), _St(20, 3600 + 35 * 60 + 15, effort="time"), _St(5, 7, effort="time", done=False)]
-    assert summarize_exercise(_Ex("weight", "time"), sets) == [
-        "Ciężar: 20 kg    Czas: 1h 36m 45s",
-        "Łączny czas: 1h 36m 45s",
-    ]
+    assert _lines(_Ex("weight", "time"), sets) == [("", ["Łączny czas: 1h 36m 45s"])]
 
 
 def test_summary_distance_reps():
     sets = [_St(400, 10, load="distance"), _St(400, 1, load="distance"), _St(1000, 5, load="distance")]
-    assert summarize_exercise(_Ex("distance", "reps"), sets) == [
-        "Dystans: 400m    Powtórzenia: 11",
-        "Dystans: 1km    Powtórzenia: 5",
-        "Łączny dystans: 9 km 400 m",
-    ]
+    assert _lines(_Ex("distance", "reps"), sets) == [("", ["Łączny dystans: 9 km 400 m"])]
 
 
 def test_summary_distance_time():
@@ -196,16 +203,24 @@ def test_summary_distance_time():
         _St(5400, 60, load="distance", effort="time"),
         _St(100, 1, load="distance", effort="time", done=False),
     ]
-    assert summarize_exercise(_Ex("distance", "time"), sets) == [
-        "Dystans: 5km 400m    Czas: 36m 10s",
-        "Łączny dystans: 10 km 800 m",
-        "Łączny czas: 36m 10s",
+    assert _lines(_Ex("distance", "time"), sets) == [("", ["Łączny dystans: 10 km 800 m", "Łączny czas: 36m 10s"])]
+
+
+def test_summary_distance_km_and_miles_are_separate():
+    sets = [
+        _St(5400, 60, load="distance", effort="time"),
+        _St(2200, 30, load="distance", effort="time", unit="mile", unit_minor="ys"),
+        _St(1000, 10, load="distance", effort="time", unit="mile", unit_minor="ys"),
+    ]
+    assert _lines(_Ex("distance", "time"), sets) == [
+        ("km / m", ["Łączny dystans: 5 km 400 m", "Łączny czas: 1m"]),
+        ("mile / ys", ["Łączny dystans: 3 mile 200 ys", "Łączny czas: 40s"]),
     ]
 
 
-def test_summary_ignores_undone_sets():
-    assert summarize_exercise(_Ex("weight", "reps"), [_St(20, 10, done=False)]) == ["Brak wykonanych serii"]
-    assert summarize_exercise(_Ex("weight", "reps"), []) == ["Brak wykonanych serii"]
+def test_summary_ignores_undone_sets_and_empty_exercise():
+    assert summarize_exercise(_Ex("weight", "reps"), [_St(20, 10, done=False)]) == []
+    assert summarize_exercise(_Ex("weight", "reps"), []) == []
 
 
 def test_fmt_value_units_and_zero_parts():
@@ -219,16 +234,6 @@ def test_fmt_value_units_and_zero_parts():
     assert fmt_value("time", 2 * 3600 + 35 * 60 + 45) == "2h 35m 45s"
     assert fmt_value("time", 3600) == "1h"
     assert fmt_value("time", 0) == "0s"
-
-
-def test_summary_distance_time_row_format():
-    sets = [_St(2200, 325, load="distance", effort="time")]
-    assert summarize_exercise(_Ex("distance", "time"), sets)[0] == "Dystans: 2km 200m    Czas: 5m 25s"
-
-
-def test_summary_weight_time_and_distance_reps_row_format():
-    assert summarize_exercise(_Ex("weight", "time"), [_St(20, 90, effort="time")])[0] == "Ciężar: 20 kg    Czas: 1m 30s"
-    assert summarize_exercise(_Ex("distance", "reps"), [_St(400, 10, load="distance")])[0] == "Dystans: 400m    Powtórzenia: 10"
 
 
 def test_toggle_done_changes_only_one_set_and_persists(db_url):
@@ -386,10 +391,9 @@ def test_floors_and_reps_measures_roundtrip(svc):
     assert (st.reps, st.duration_s, st.weight_kg, st.distance_m) == (12, 600, None, None)
     assert fmt_set_line(stair.exercise, st, 1) == "1. 12 pięt. — 10m"
     assert svc.add_set(stair.id).reps == 12
-    lines = summarize_exercise(stair.exercise, [st])
-    assert lines == [f"Piętra: 12    Czas: 10m", "Łączne piętra: 12", "Łączny czas: 10m"]
+    assert _lines(stair.exercise, [st]) == [("", ["Łączne piętra: 12", "Łączny czas: 10m"])]
     st2 = loaded["Pompki własne"].sets[0]
-    assert summarize_exercise(reps_ex, [st2])[0] == "Powtórzenia: 30    Czas: 1m"
+    assert _lines(reps_ex, [st2]) == [("", ["Łączne powtórzenia: 30", "Łączny czas: 1m"])]
     assert fmt_set_line(reps_ex, st2, 2) == "2. 30 powt. — 1m"
 
 
@@ -528,7 +532,7 @@ def test_fractional_weight_roundtrip_and_summary(svc):
     st = svc.get_workout_by_date(TODAY).exercises[0].sets[0]
     assert st.weight_kg == 2.5
     ex = svc.get_workout_by_date(TODAY).exercises[0].exercise
-    assert summarize_exercise(ex, [st]) == ["Ciężar: 2.5 kg    Powtórzenia: 3", "Suma przewalonego żelastwa: 7.5 kg"]
+    assert _lines(ex, [st]) == [("", ["Suma przewalonego żelastwa: 7.5 kg"])]
 
 
 def test_fmt_decimal():
@@ -852,3 +856,139 @@ def test_same_snapshot_can_be_pasted_on_many_days(svc):
     a = svc.paste_snapshot(snap, TODAY + timedelta(days=1))
     b = svc.paste_snapshot(snap, TODAY + timedelta(days=2))
     assert a.id != b.id and _flat(a) == _flat(b) == _flat(svc.get_workout(src.id))
+
+
+def test_has_snapshot_to_paste():
+    assert not has_snapshot_to_paste(None)
+    assert has_snapshot_to_paste(WorkoutSnapshot(name="x", exercises=()))
+
+
+def _workout_with_exercise(svc, day):
+    w = svc.create_workout(day)
+    svc.add_exercise_to_workout(w.id, svc.list_exercises()[0].id)
+    return w
+
+
+def test_last_workout_excludes_today(svc):
+    _workout_with_exercise(svc, TODAY)
+    assert svc.get_last_workout(TODAY) is None
+
+
+def test_last_workout_skips_future(svc):
+    _workout_with_exercise(svc, TODAY + timedelta(days=1))
+    assert svc.get_last_workout(TODAY) is None
+
+
+def test_last_workout_prefers_newest_past_over_today(svc):
+    _workout_with_exercise(svc, TODAY - timedelta(days=5))
+    newest = _workout_with_exercise(svc, TODAY - timedelta(days=2))
+    _workout_with_exercise(svc, TODAY)
+    assert svc.get_last_workout(TODAY).id == newest.id
+
+
+# --- jednostki serii ---
+@pytest.mark.parametrize(
+    "measure, units",
+    [("weight", ("kg", "lbs")), ("distance", ("km", "mile")), ("distance_minor", ("m", "ys"))],
+)
+def test_allowed_units_and_default(measure, units):
+    assert allowed_units(measure) == units
+    assert default_unit(measure) == units[0]
+    assert validate_unit(measure, None) == units[0]
+    assert all(validate_unit(measure, u) == u for u in units)
+
+
+@pytest.mark.parametrize(
+    "measure, unit",
+    [("weight", "km"), ("weight", "ys"), ("distance", "kg"), ("distance", "m"), ("distance_minor", "mile"), ("weight", "")],
+)
+def test_validate_unit_rejects_unit_of_other_measure(measure, unit):
+    with pytest.raises(ValidationError):
+        validate_unit(measure, unit)
+
+
+@pytest.mark.parametrize("measure", ["reps", "floors", "time", "nonsense"])
+def test_measures_without_unit_choice_are_rejected(measure):
+    with pytest.raises(ValidationError):
+        allowed_units(measure)
+
+
+def _weight_and_distance_sets(svc):
+    w = _two_exercise_workout(svc, TODAY)
+    weight_we, distance_we = svc.get_workout(w.id).exercises
+    return w, weight_we.sets[0], distance_we.sets[0]
+
+
+def test_set_unit_defaults_to_base_units(svc):
+    _, weight_set, distance_set = _weight_and_distance_sets(svc)
+    assert svc.get_set_unit(weight_set.id, "weight") == "kg"
+    assert svc.get_set_unit(distance_set.id, "distance") == "km"
+    assert svc.get_set_unit(distance_set.id, "distance_minor") == "m"
+
+
+def test_set_unit_saved_and_read_back_without_changing_values(svc):
+    w, weight_set, distance_set = _weight_and_distance_sets(svc)
+    svc.set_set_unit(weight_set.id, "weight", "lbs")
+    svc.set_set_unit(distance_set.id, "distance", "mile")
+    svc.set_set_unit(distance_set.id, "distance_minor", "ys")
+    assert svc.get_set_unit(weight_set.id, "weight") == "lbs"
+    assert (svc.get_set_unit(distance_set.id, "distance"), svc.get_set_unit(distance_set.id, "distance_minor")) == ("mile", "ys")
+    saved_weight, saved_distance = svc.get_workout(w.id).exercises
+    assert set_unit_of(saved_weight.sets[0], "weight") == "lbs"
+    assert (saved_weight.sets[0].weight_kg, saved_distance.sets[0].distance_m) == (80.0, 1500)  # bez przeliczania
+
+
+def test_set_unit_is_per_set(svc):
+    w, weight_set, _ = _weight_and_distance_sets(svc)
+    other = svc.get_workout(w.id).exercises[0].sets[1]
+    svc.set_set_unit(weight_set.id, "weight", "lbs")
+    assert svc.get_set_unit(other.id, "weight") == "kg"
+
+
+def test_set_unit_rejects_wrong_unit_or_measure_for_set(svc):
+    _, weight_set, distance_set = _weight_and_distance_sets(svc)
+    with pytest.raises(ValidationError):
+        svc.set_set_unit(weight_set.id, "weight", "km")
+    with pytest.raises(ValidationError):
+        svc.set_set_unit(weight_set.id, "distance", "km")  # seria ciężarowa nie ma dystansu
+    with pytest.raises(ValidationError):
+        svc.set_set_unit(distance_set.id, "weight", "kg")
+    assert svc.get_set_unit(weight_set.id, "weight") == "kg"
+
+
+def test_new_set_copies_units_of_previous_set(svc):
+    w, _, _ = _weight_and_distance_sets(svc)
+    we = svc.get_workout(w.id).exercises[0]
+    svc.set_set_unit(we.sets[-1].id, "weight", "lbs")  # nowa seria kopiuje ostatnią
+    new = svc.add_set(we.id)
+    assert svc.get_set_unit(new.id, "weight") == "lbs"
+
+
+def test_copy_paste_carries_set_units(svc):
+    src, weight_set, distance_set = _weight_and_distance_sets(svc)
+    svc.set_set_unit(weight_set.id, "weight", "lbs")
+    svc.set_set_unit(distance_set.id, "distance", "mile")
+    svc.set_set_unit(distance_set.id, "distance_minor", "ys")
+    pasted = svc.paste_snapshot(svc.snapshot_workout(src.id), TODAY + timedelta(days=1))
+    pasted_weight, pasted_distance = pasted.exercises
+    assert [set_unit_of(st, "weight") for st in pasted_weight.sets] == ["lbs", "kg"]
+    assert set_unit_of(pasted_distance.sets[0], "distance") == "mile"
+    assert set_unit_of(pasted_distance.sets[0], "distance_minor") == "ys"
+
+
+def test_old_workout_tables_are_recreated_with_backup(tmp_path):
+    db = tmp_path / "old.db"
+    url = f"sqlite:///{db}"
+    svc = TrainingService(make_session_factory(make_engine(url)))
+    _two_exercise_workout(svc, TODAY)
+    engine = make_engine(url)
+    with engine.begin() as conn:  # odtwarza stary schemat: tabela serii bez kolumn jednostek
+        conn.execute(text("ALTER TABLE workout_set DROP COLUMN unit"))
+        conn.execute(text("ALTER TABLE workout_set DROP COLUMN unit_minor"))
+    engine.dispose()
+    exercises_before = len(TrainingService(make_session_factory(make_engine(f"sqlite:///{db}"))).list_exercises())
+
+    reopened = TrainingService(make_session_factory(make_engine(url)))
+    assert {"unit", "unit_minor"} <= {c["name"] for c in inspect(make_engine(url)).get_columns("workout_set")}
+    assert count(reopened, Workout) == 0 and len(reopened.list_exercises()) == exercises_before
+    assert (tmp_path / "old.db.bak").is_file()
