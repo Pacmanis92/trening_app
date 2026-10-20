@@ -480,8 +480,7 @@ class TrainBeastApp:
             value=workout.name,
             border=ft.InputBorder.NONE,
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=0),
-            text_vertical_align=ft.VerticalAlignment.CENTER,
-            height=NAME_ROW_HEIGHT - 2,
+            dense=True,  # bez sztywnej height: ta wypychała tekst poza dolną krawędź; wysokość i tak daje Container
             on_change=lambda e: self.service.rename_workout(workout.id, e.control.value),
         )
         name_box = ft.Container(
