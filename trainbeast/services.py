@@ -439,6 +439,51 @@ def interpret_swipe(dx: float, threshold: float = SWIPE_MIN_DISTANCE) -> int:
     return 0
 
 
+def drag_progress(dx: float, width: float, base: float = 0.0) -> float:
+    """Postęp przesuwania w [-1, 1]: przeciągnięcie w lewo (dx < 0) daje wartość dodatnią (w stronę następnego dnia).
+
+    base to postęp w chwili rozpoczęcia gestu (np. przejęcie animacji w trakcie), width to szerokość obszaru widoku.
+    """
+    if width <= 0:
+        return 0.0
+    return max(-1.0, min(1.0, base - dx / width))
+
+
+def settle_target(progress: float) -> int:
+    """Dzień docelowy po zwolnieniu palca: 1 / -1, gdy sąsiedni widok zajmuje ponad 50% szerokości, inaczej 0."""
+    if progress > 0.5:
+        return 1
+    if progress < -0.5:
+        return -1
+    return 0
+
+
+def settle_duration(progress: float, target: int, width: float, velocity: float = 0.0) -> float:
+    """Czas (s) dokończenia animacji; szybki gest skraca czas, ale nie zmienia wyboru dnia (zob. settle_target)."""
+    distance = abs(target - progress)
+    speed = max(abs(velocity), 2 * width, 1.0)
+    return max(0.06, min(0.3, distance * width / speed))
+
+
+def day_tape_layout(progress: float, width: float, offsets: range | tuple[int, ...] = range(-3, 4)) -> list[tuple[int, float, float]]:
+    """Układ taśmy dni w oknie o szerokości width: lista (offset dnia, lewa krawędź, szerokość).
+
+    W spoczynku (progress = 0) widoczne są dni -2..2, wybrany jest szerszy (3 jednostki wobec 2 u pozostałych); środek
+    zaznaczonego dnia leży w środku okna. Przy przesuwaniu szerokość płynnie przechodzi na sąsiada.
+    """
+    unit = width / 11
+    widths = {o: 2 * unit + unit * max(0.0, 1 - abs(o - progress)) for o in offsets}
+    first = min(offsets)
+    start, acc = {}, 0.0
+    for o in offsets:
+        start[o] = acc
+        acc += widths[o]
+    neighbour = 1 if progress >= 0 else -1
+    w_nb = widths.get(neighbour, 2 * unit)
+    focus = start[0] + widths[0] / 2 + abs(progress) * neighbour * (widths[0] + w_nb) / 2
+    return [(o, width / 2 - focus + start[o], widths[o]) for o in offsets if first <= o]
+
+
 def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     index = year * 12 + (month - 1) + delta
     return index // 12, index % 12 + 1

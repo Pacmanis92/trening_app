@@ -2,3 +2,5 @@ __pycache__/
 .pytest_cache/
 *.db
 .build
+# Pliki APK
+build/apk/*.apk

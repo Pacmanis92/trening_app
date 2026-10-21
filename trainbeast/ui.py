@@ -1,3 +1,5 @@
+import asyncio
+import time
 from datetime import date, timedelta
 
 import flet as ft
@@ -15,7 +17,8 @@ from .services import (
     has_snapshot_to_paste,
     fmt_decimal,
     fmt_set_line,
-    interpret_swipe,
+    day_tape_layout,
+    drag_progress,
     is_calendar_today,
     is_valid_digits_input,
     is_valid_distance_input,
@@ -29,6 +32,8 @@ from .services import (
     parse_reps,
     parse_weight,
     set_unit_of,
+    settle_duration,
+    settle_target,
     shift_month,
     summarize_exercise,
     weekday_abbr,
@@ -141,21 +146,6 @@ def done_icon(done: bool) -> ft.Icon:
     )
 
 
-def swipeable(content: ft.Control, on_step) -> ft.GestureDetector:
-    """Poziome przeciągnięcie palcem: on_step(+1) po przeciągnięciu w lewo, on_step(-1) w prawo (zob. interpret_swipe)."""
-    start = {"x": 0.0}
-
-    def on_start(e: ft.DragStartEvent) -> None:
-        start["x"] = e.global_position.x
-
-    def on_end(e: ft.DragEndEvent) -> None:
-        step = interpret_swipe(e.global_position.x - start["x"])
-        if step:
-            on_step(step)
-
-    return ft.GestureDetector(content, on_horizontal_drag_start=on_start, on_horizontal_drag_end=on_end)
-
-
 def own_button(text: str, on_click, **kwargs) -> ft.FilledButton:
     """„Dodaj własne” i „Dodaj sekcję”: wspólny wygląd w oknie wyboru ćwiczenia."""
     return ft.FilledButton(text, height=BTN_HEIGHT - 8, on_click=on_click, **kwargs)
@@ -171,6 +161,7 @@ class TrainBeastApp:
         self.set_groups: dict[int, list[tuple[str, list[ft.TextField]]]] = {}
         self.expanded: set[int] = set()  # karty w trybie edycji (tylko UI)
         self.snapshot: WorkoutSnapshot | None = None  # skopiowany trening (tylko w pamięci)
+        self._reset_swipe()
 
         page.title = "TrainBeast"
         page.padding = 0
@@ -181,7 +172,8 @@ class TrainBeastApp:
         self.render()
 
     # --- infrastruktura ---
-    def _show(self, fixed: list[ft.Control], scrolling: list[ft.Control]) -> None:
+    def _show(self, header: list[ft.Control], swipe_top: list[ft.Control], panel: ft.Control) -> None:
+        """header: część nad paskiem dni (poza obszarem gestu); swipe_top + panel: obszar gestu od paska dni do dołu."""
         self.page.controls.clear()
         self.page.add(
             ft.SafeArea(
@@ -194,17 +186,24 @@ class TrainBeastApp:
                             ft.Container(
                                 bgcolor=BLACK,
                                 content=ft.Column(
-                                    list(fixed),
+                                    list(header),
                                     spacing=12,
                                     horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 ),
                             ),
-                            ft.Column(
-                                list(scrolling),
-                                scroll=ft.ScrollMode.AUTO,
+                            ft.GestureDetector(
+                                ft.Column(
+                                    [*swipe_top, panel],
+                                    expand=True,
+                                    spacing=12,
+                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                ),
                                 expand=True,
-                                spacing=12,
-                                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                drag_interval=10,
+                                on_horizontal_drag_start=self._on_drag_start,
+                                on_horizontal_drag_update=self._on_drag_update,
+                                on_horizontal_drag_end=self._on_drag_end,
+                                on_horizontal_drag_cancel=self._on_drag_cancel,
                             ),
                         ],
                         expand=True,
@@ -271,11 +270,11 @@ class TrainBeastApp:
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            self._day_bar(),
         ]
+        swipe_top: list[ft.Control] = [self._day_bar()]
         if self.selected != date.today():
-            controls.append(ft.TextButton("Wróć do dzisiaj", height=LINK_HEIGHT, style=ft.ButtonStyle(color=ft.Colors.WHITE, padding=ft.Padding.symmetric(horizontal=12)), on_click=lambda e: self._select(date.today())))
-        self._show(controls, self._day_content())
+            swipe_top.append(ft.TextButton("Wróć do dzisiaj", height=LINK_HEIGHT, style=ft.ButtonStyle(color=ft.Colors.WHITE, padding=ft.Padding.symmetric(horizontal=12)), on_click=lambda e: self._select(date.today())))
+        self._show(controls, swipe_top, self._build_panels())
 
     def _last_workout_info(self) -> str:
         last = self.service.get_last_workout()
@@ -298,32 +297,18 @@ class TrainBeastApp:
 
     def _day_bar(self) -> ft.Control:
         today = date.today()  # przy każdym przerysowaniu, nie przy starcie
+        self._reset_swipe()
+        self._tabs = {}
 
         def tab(offset: int) -> ft.Container:
             day = self.selected + timedelta(days=offset)
-            selected = offset == 0
             is_today = day == today
             label = "Dzisiaj" if is_today else fmt_short(day)
-            color = BLACK if selected else ft.Colors.WHITE if is_today else None
-            return ft.Container(
+            abbr = ft.Text(weekday_abbr(day), size=DAY_ABBR_SIZE, text_align=ft.TextAlign.CENTER, max_lines=1)
+            number = ft.Text(label, size=13, text_align=ft.TextAlign.CENTER, max_lines=1)
+            container = ft.Container(
                 ft.Column(
-                    [
-                        ft.Text(
-                            weekday_abbr(day),
-                            size=DAY_ABBR_SIZE,
-                            color=color,
-                            text_align=ft.TextAlign.CENTER,
-                            max_lines=1,
-                        ),
-                        ft.Text(
-                            label,
-                            size=13,
-                            weight=ft.FontWeight.BOLD if selected or is_today else ft.FontWeight.NORMAL,
-                            color=color,
-                            text_align=ft.TextAlign.CENTER,
-                            max_lines=1,
-                        ),
-                    ],
+                    [abbr, number],
                     spacing=0,
                     tight=True,
                     alignment=ft.MainAxisAlignment.CENTER,
@@ -331,11 +316,12 @@ class TrainBeastApp:
                 ),
                 alignment=ft.Alignment.CENTER,
                 height=DAY_TAB_HEIGHT,
-                expand=3 if selected else 2,
+                top=0,
                 border_radius=12,
-                bgcolor=ACCENT if selected else None,
                 on_click=lambda e, d=day: self._select(d),
             )
+            self._tabs[offset] = (container, abbr, number, is_today)
+            return container
 
         def arrow(icon, delta: int) -> ft.Container:
             return ft.Container(
@@ -346,19 +332,154 @@ class TrainBeastApp:
                 on_click=lambda e: self._select(self.selected + timedelta(days=delta)),
             )
 
-        return swipeable(
-            ft.Container(
-                ft.Row(
-                    [arrow(ft.Icons.CHEVRON_LEFT, -1), *(tab(o) for o in (-2, -1, 0, 1, 2)), arrow(ft.Icons.CHEVRON_RIGHT, 1)],
-                    spacing=2,
-                ),
-                bgcolor=FILL_DARK,
-                border=ft.Border.all(1, ACCENT),
-                border_radius=DAY_BAR_RADIUS,
-                padding=ft.Padding.symmetric(horizontal=8, vertical=DAY_BAR_V_PAD),
-            ),
-            lambda step: self._select(self.selected + timedelta(days=step)),
+        # nieruchoma ramka (zewnętrzny kontener, strzałki) + okno z przycinaniem; przesuwa się tylko taśma dni w oknie
+        self._tape_width = (self.page.width or 390) - 2 * SCREEN_MARGIN - 2 - 16 - 2 * 28 - 2 * 2
+        self._tape = ft.Stack([tab(o) for o in range(-3, 4)], height=DAY_TAB_HEIGHT)
+        window = ft.Container(
+            self._tape,
+            expand=True,
+            height=DAY_TAB_HEIGHT,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            on_size_change=self._on_tape_size,
         )
+        self._layout_tape(0.0)
+        return ft.Container(
+            ft.Row([arrow(ft.Icons.CHEVRON_LEFT, -1), window, arrow(ft.Icons.CHEVRON_RIGHT, 1)], spacing=2),
+            bgcolor=FILL_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=DAY_BAR_RADIUS,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=DAY_BAR_V_PAD),
+        )
+
+    def _on_tape_size(self, e) -> None:
+        if abs(e.width - self._tape_width) > 0.5:
+            self._tape_width = e.width
+            self._layout_tape(self._progress)
+            self.page.update()
+
+    def _layout_tape(self, progress: float) -> None:
+        """Ustawia położenie, szerokość i wyróżnienie każdego dnia taśmy dla danego postępu przesuwania."""
+        for offset, left, width in day_tape_layout(progress, self._tape_width):
+            container, abbr, number, is_today = self._tabs[offset]
+            focus = max(0.0, 1 - abs(offset - progress))  # 1 = w pełni wybrany dzień, 0 = zwykły
+            container.left = left + 1
+            container.width = max(0.0, width - 2)
+            container.bgcolor = ft.Colors.with_opacity(focus, ACCENT) if focus > 0 else None
+            color = BLACK if focus > 0.5 else ft.Colors.WHITE if is_today else None
+            abbr.color = number.color = color
+            number.weight = ft.FontWeight.BOLD if focus > 0.5 or is_today else ft.FontWeight.NORMAL
+
+    # --- przesuwanie dni gestem ---
+    def _reset_swipe(self) -> None:
+        self._progress = 0.0  # -1..1: ułamek szerokości zajęty przez sąsiada (>0: następny dzień nadjeżdża z prawej)
+        self._drag_origin: tuple[float, float] | None = None  # (x palca, postęp) w chwili startu gestu
+        self._anim_gen = getattr(self, "_anim_gen", 0) + 1  # unieważnia trwającą animację
+        self._panels: dict[int, ft.Container] = {}  # -1 / 0 / 1 -> panel dnia
+        self._panel_width = (self.page.width or 390) - 2 * SCREEN_MARGIN
+        self._tabs: dict = {}
+        self._tape_width = 0.0
+
+    def _build_panels(self) -> ft.Control:
+        self._panels = {0: self._make_panel(self._day_content())}
+        self._panel_stack = ft.Stack([self._panels[0]])
+        return ft.Container(
+            self._panel_stack,
+            expand=True,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            on_size_change=self._on_panel_size,
+        )
+
+    @staticmethod
+    def _make_panel(controls: list[ft.Control]) -> ft.Container:
+        return ft.Container(
+            ft.Column(list(controls), scroll=ft.ScrollMode.AUTO, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+            bgcolor=BLACK,  # tło: panel zasłania sąsiada i przyjmuje dotyk w pustych miejscach
+            left=0,
+            right=0,
+            top=0,
+            bottom=0,
+            offset=ft.Offset(0, 0),
+        )
+
+    def _on_panel_size(self, e) -> None:
+        if abs(e.width - self._panel_width) > 0.5:
+            self._panel_width = e.width
+
+    def _preview_panel(self, step: int) -> ft.Container:
+        """Zawartość sąsiedniego dnia budowana bez naruszania stanu bieżącego widoku (cards_column, set_fields, ...)."""
+        names = ("selected", "workout_id", "cards_column", "set_fields", "set_groups", "expanded")
+        saved = {n: getattr(self, n, None) for n in names}
+        try:
+            self.selected = saved["selected"] + timedelta(days=step)
+            self.expanded = set()
+            self.set_fields, self.set_groups = {}, {}
+            return self._make_panel(self._day_content())
+        finally:
+            for n, v in saved.items():
+                setattr(self, n, v)
+
+    def _ensure_neighbours(self) -> None:
+        added = False
+        for step in (-1, 1):
+            if step not in self._panels:
+                panel = self._preview_panel(step)
+                panel.offset = ft.Offset(step - self._progress, 0)  # poza oknem do pierwszego ruchu
+                self._panels[step] = panel
+                self._panel_stack.controls.append(panel)
+                added = True
+        if added:
+            self.page.update()
+
+    def _apply_progress(self, progress: float) -> None:
+        self._progress = progress
+        for step, panel in self._panels.items():
+            panel.offset = ft.Offset(step - progress, 0)
+        self._layout_tape(progress)
+        self.page.update()
+
+    def _on_drag_start(self, e: ft.DragStartEvent) -> None:
+        self._anim_gen += 1  # przejmuje trwającą animację: kontynuacja od bieżącej pozycji
+        self._drag_origin = (e.global_position.x, self._progress)
+        self._ensure_neighbours()
+
+    def _on_drag_update(self, e: ft.DragUpdateEvent) -> None:
+        if self._drag_origin is None:
+            return
+        x0, base = self._drag_origin
+        self._apply_progress(drag_progress(e.global_position.x - x0, self._panel_width, base))
+
+    async def _on_drag_end(self, e: ft.DragEndEvent) -> None:
+        if self._drag_origin is None:
+            return
+        self._drag_origin = None
+        await self._settle(e.primary_velocity or 0.0)
+
+    async def _on_drag_cancel(self, e) -> None:
+        if self._drag_origin is None:
+            return
+        self._drag_origin = None
+        await self._settle(0.0)
+
+    async def _settle(self, velocity: float) -> None:
+        """Dokańcza ruch do 0 / ±1 wg reguły 50%; tę samą klatkę dostają widok treningu i taśma dni."""
+        self._anim_gen += 1
+        gen = self._anim_gen
+        start, target = self._progress, settle_target(self._progress)
+        duration = settle_duration(start, target, self._panel_width, velocity)
+        began = time.perf_counter()
+        while True:
+            t = min(1.0, (time.perf_counter() - began) / duration)
+            if gen != self._anim_gen:
+                return  # nowy gest przejął animację
+            eased = 1 - (1 - t) ** 3
+            self._apply_progress(start + (target - start) * eased)
+            if t >= 1.0:
+                break
+            await asyncio.sleep(0.012)
+        if gen != self._anim_gen:
+            return
+        if target:
+            self._select(self.selected + timedelta(days=target))
 
     # --- kalendarz ---
     def _open_calendar(self, e=None) -> None:
