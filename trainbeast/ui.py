@@ -119,6 +119,11 @@ def add_exercise_style(padding=None) -> ft.ButtonStyle:
     return ft.ButtonStyle(bgcolor=ACCENT_DARK, color=ft.Colors.WHITE, padding=padding)
 
 
+def cancel_style() -> ft.ButtonStyle:
+    """„Anuluj" i „Zamknij" w oknach: żółty napis (kolor tekstu „Usuń trening"), bez zmiany tła."""
+    return ft.ButtonStyle(color=ACCENT)
+
+
 def header_btn_style(padding=None) -> ft.ButtonStyle:
     """Wspólny styl ikony kalendarza i „Donate": czarne wypełnienie, żółta ramka, to samo zaokrąglenie."""
     return ft.ButtonStyle(
@@ -147,8 +152,8 @@ def done_icon(done: bool) -> ft.Icon:
 
 
 def own_button(text: str, on_click, **kwargs) -> ft.FilledButton:
-    """„Dodaj własne” i „Dodaj sekcję”: wspólny wygląd w oknie wyboru ćwiczenia."""
-    return ft.FilledButton(text, height=BTN_HEIGHT - 8, on_click=on_click, **kwargs)
+    """„Dodaj własne” i „Dodaj sekcję”: wspólny wygląd w oknie wyboru ćwiczenia (styl „+ Dodaj ćwiczenie”)."""
+    return ft.FilledButton(text, height=BTN_HEIGHT - 8, style=add_exercise_style(), on_click=on_click, **kwargs)
 
 
 class TrainBeastApp:
@@ -675,8 +680,8 @@ class TrainBeastApp:
             "Usunąć trening?",
             ft.Text(f"Cały trening z dnia {fmt_date(self.selected)} zostanie usunięty."),
             [
-                ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
-                ft.TextButton("Usuń", on_click=do_delete),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Usuń", style=cancel_style(), on_click=do_delete),
             ],
         )
 
@@ -802,7 +807,7 @@ class TrainBeastApp:
                 tight=True,
                 spacing=6,
             ),
-            [ft.TextButton("Zamknij", on_click=lambda e: self.page.pop_dialog())],
+            [ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self.page.pop_dialog())],
         )
 
     @staticmethod
@@ -820,7 +825,7 @@ class TrainBeastApp:
         controls: list[ft.Control] = []
         for group in groups:
             if group.heading:  # kilka jednostek: nagłówek z jednostką nad wynikami grupy
-                controls.append(ft.Text(group.heading, size=14, weight=ft.FontWeight.BOLD, color=ACTION_BLUE))
+                controls.append(ft.Text(group.heading, size=14, weight=ft.FontWeight.BOLD, color=ACCENT))
             controls.extend(ft.Text(line, size=16) for line in group.lines)
         return controls
 
@@ -1114,8 +1119,8 @@ class TrainBeastApp:
             "Usunąć ćwiczenie?",
             ft.Text(f"„{name}” wraz ze wszystkimi seriami zostanie usunięte z treningu."),
             [
-                ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
-                ft.TextButton("Usuń", on_click=do_remove),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Usuń", style=cancel_style(), on_click=do_remove),
             ],
         )
 
@@ -1150,6 +1155,7 @@ class TrainBeastApp:
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                    bgcolor=FILL_DARK,
                     border=ft.Border.all(1, ft.Colors.OUTLINE),
                     border_radius=12,
                     on_click=lambda e, n=name: toggle(n),
@@ -1162,6 +1168,7 @@ class TrainBeastApp:
                             ft.Text(ex.name, size=15),
                             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
                             margin=ft.Margin.only(left=12),
+                            bgcolor=FILL_DARK,
                             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
                             border_radius=8,
                             on_click=lambda e, exid=ex.id: add(exid),
@@ -1175,7 +1182,7 @@ class TrainBeastApp:
                                 lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
                                 expand=1,
                             ),
-                            ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, on_click=lambda e, n=name: toggle(n)),
+                            ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, style=delete_style(), on_click=lambda e, n=name: toggle(n)),
                         ],
                         spacing=8,
                     )
@@ -1199,7 +1206,7 @@ class TrainBeastApp:
         self._dialog(
             "Dodaj ćwiczenie",
             items,
-            [ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog())],
+            [ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog())],
             inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
         )
@@ -1221,8 +1228,8 @@ class TrainBeastApp:
             "Dodaj sekcję",
             ft.Column([name], tight=True, width=300),
             [
-                ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
-                ft.FilledButton("Dodaj", height=BTN_HEIGHT, on_click=create),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("Dodaj", height=BTN_HEIGHT, style=add_exercise_style(), on_click=create),
             ],
         )
 
@@ -1240,6 +1247,10 @@ class TrainBeastApp:
         )
         effort = ft.SegmentedButton(
             selected=["reps"],
+            style=ft.ButtonStyle(
+                bgcolor={ft.ControlState.SELECTED: ACCENT_DARK},
+                color=ft.Colors.WHITE,
+            ),
             segments=[ft.Segment("reps", label=ft.Text("Powtórzenia")), ft.Segment("time", label=ft.Text("Czas"))],
         )
 
@@ -1257,7 +1268,7 @@ class TrainBeastApp:
             "Własne ćwiczenie",
             ft.Column([name, load, effort], tight=True, spacing=12, width=300),
             [
-                ft.TextButton("Anuluj", on_click=lambda e: self.page.pop_dialog()),
-                ft.FilledButton("Dodaj", height=BTN_HEIGHT, on_click=create),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("Dodaj", height=BTN_HEIGHT, style=add_exercise_style(), on_click=create),
             ],
         )
