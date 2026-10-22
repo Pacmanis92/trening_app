@@ -180,11 +180,6 @@ def is_valid_distance_input(text: str) -> bool:
     return text == "" or (len(text) <= DISTANCE_M_MAX_DIGITS and text.isascii() and text.isdigit())
 
 
-def is_calendar_today(day: date, shown_month: int, today: date) -> bool:
-    """Czy komórka kalendarza to dzisiaj: tylko dzień z wyświetlanego miesiąca (nie dopełnienie tygodnia)."""
-    return day == today and day.month == shown_month
-
-
 def is_valid_weight_input(text: str) -> bool:
     """Czy tekst pola ciężaru jest dozwolony: cyfry i najwyżej jeden separator (kropka lub przecinek)."""
     return _WEIGHT_RE.fullmatch(text) is not None
@@ -416,15 +411,36 @@ def weekday_abbr(day: date) -> str:
     return WEEKDAY_ABBR[day.weekday()]
 
 
-class CalendarWeek(NamedTuple):
-    iso_week: int
-    days: list[date]  # 7 dat od poniedziałku, razem z dniami sąsiednich miesięcy
+MONTH_NAMES_GENITIVE = (
+    "STYCZNIA", "LUTEGO", "MARCA", "KWIETNIA", "MAJA", "CZERWCA",
+    "LIPCA", "SIERPNIA", "WRZEŚNIA", "PAŹDZIERNIKA", "LISTOPADA", "GRUDNIA",
+)
+CALENDAR_MONTHS_BACK = 24
+CALENDAR_MONTHS_FORWARD = 24
 
 
-def month_grid(year: int, month: int) -> list[CalendarWeek]:
-    """Tygodnie (od poniedziałku) pokrywające miesiąc: 5 albo 6 wierszy."""
+def month_grid(year: int, month: int) -> list[list[date | None]]:
+    """Tygodnie miesiąca (od poniedziałku), po 7 pól; None = puste pole przed 1. lub po ostatnim dniu miesiąca."""
     weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(year, month)
-    return [CalendarWeek(week[0].isocalendar()[1], week) for week in weeks]
+    return [[d if d.month == month else None for d in week] for week in weeks]
+
+
+def month_range(
+    center: date, back: int = CALENDAR_MONTHS_BACK, forward: int = CALENDAR_MONTHS_FORWARD
+) -> list[tuple[int, int]]:
+    """Kolejne miesiące (rok, miesiąc) od `back` miesięcy przed miesiącem `center` do `forward` miesięcy po nim."""
+    return [shift_month(center.year, center.month, delta) for delta in range(-back, forward + 1)]
+
+
+def classify_day(day: date, today: date, workout_dates: set[date]) -> str:
+    """Rodzaj dnia w kalendarzu: "today" > "workout" > "sunday" > "normal"."""
+    if day == today:
+        return "today"
+    if day in workout_dates:
+        return "workout"
+    if day.weekday() == 6:
+        return "sunday"
+    return "normal"
 
 
 SWIPE_MIN_DISTANCE = 50  # px poziomego przeciągnięcia, od którego gest liczy się jako przesunięcie
@@ -654,14 +670,17 @@ class TrainingService:
 
     def get_workout_dates(self, year: int, month: int) -> set[date]:
         """Dni miesiąca z treningiem mającym co najmniej jedno ćwiczenie."""
-        first = date(year, month, 1)
         ny, nm = shift_month(year, month, 1)
+        return self.get_workout_dates_between(date(year, month, 1), date(ny, nm, 1))
+
+    def get_workout_dates_between(self, first: date, end: date) -> set[date]:
+        """Dni z zakresu [first, end) z treningiem mającym co najmniej jedno ćwiczenie (jedno zapytanie)."""
         with self._sf() as s:
             return set(
                 s.scalars(
                     select(Workout.workout_date).where(
                         Workout.workout_date >= first,
-                        Workout.workout_date < date(ny, nm, 1),
+                        Workout.workout_date < end,
                         Workout.exercises.any(),
                     )
                 )

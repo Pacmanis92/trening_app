@@ -6,7 +6,7 @@ import flet as ft
 
 from .services import (
     EMPTY_SUMMARY,
-    MONTH_NAMES,
+    MONTH_NAMES_GENITIVE,
     WEEKDAY_ABBR,
     TrainingService,
     ValidationError,
@@ -19,12 +19,13 @@ from .services import (
     fmt_set_line,
     day_tape_layout,
     drag_progress,
-    is_calendar_today,
+    classify_day,
     is_valid_digits_input,
     is_valid_distance_input,
     is_valid_minsec_input,
     is_valid_weight_input,
     month_grid,
+    month_range,
     normalize_empty_input,
     parse_distance,
     parse_duration,
@@ -51,6 +52,11 @@ LABEL_OVERHANG = 8  # tyle etykieta wystaje nad ramkę pola (jej środek leży n
 SET_ROW_HEIGHT = SET_FIELD_HEIGHT + LABEL_OVERHANG
 NAME_ROW_HEIGHT = 60 * 0.6  # pole „Nazwa treningu" i przycisk „Kopiuj": jedna wspólna wysokość
 CAL_TEXT = "#222222"
+CAL_ROW_HEIGHT = 48
+CAL_TITLE_HEIGHT = 44
+CAL_WEEKDAY_HEIGHT = 28
+CAL_MONTH_GAP = 16  # odstęp nad nagłówkiem miesiąca
+CAL_MONTH_FIXED = CAL_TITLE_HEIGHT + CAL_WEEKDAY_HEIGHT + CAL_MONTH_GAP  # wysokość miesiąca bez wierszy dni
 CAL_SAT = ft.Colors.GREY_600
 CAL_SUN = ft.Colors.RED_600
 ACCENT = "#FCB808"  # żółty ramek (odczytany ze zrzutu inspiracji)
@@ -177,8 +183,24 @@ class TrainBeastApp:
         self.render()
 
     # --- infrastruktura ---
-    def _show(self, header: list[ft.Control], swipe_top: list[ft.Control], panel: ft.Control) -> None:
+    def _show(self, header: list[ft.Control], swipe_top: list[ft.Control], panel: ft.Control, gesture: bool = True) -> None:
         """header: część nad paskiem dni (poza obszarem gestu); swipe_top + panel: obszar gestu od paska dni do dołu."""
+        body = ft.Column(
+            [*swipe_top, panel],
+            expand=True,
+            spacing=12,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        if gesture:
+            body = ft.GestureDetector(
+                body,
+                expand=True,
+                drag_interval=10,
+                on_horizontal_drag_start=self._on_drag_start,
+                on_horizontal_drag_update=self._on_drag_update,
+                on_horizontal_drag_end=self._on_drag_end,
+                on_horizontal_drag_cancel=self._on_drag_cancel,
+            )
         self.page.controls.clear()
         self.page.add(
             ft.SafeArea(
@@ -196,20 +218,7 @@ class TrainBeastApp:
                                     horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 ),
                             ),
-                            ft.GestureDetector(
-                                ft.Column(
-                                    [*swipe_top, panel],
-                                    expand=True,
-                                    spacing=12,
-                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                                ),
-                                expand=True,
-                                drag_interval=10,
-                                on_horizontal_drag_start=self._on_drag_start,
-                                on_horizontal_drag_update=self._on_drag_update,
-                                on_horizontal_drag_end=self._on_drag_end,
-                                on_horizontal_drag_cancel=self._on_drag_cancel,
-                            ),
+                            body,
                         ],
                         expand=True,
                         spacing=12,
@@ -227,11 +236,10 @@ class TrainBeastApp:
         self.page.show_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions, **kwargs))
 
     # --- główny widok ---
-    def render(self) -> None:
-        self.set_fields = {}
-        self.set_groups = {}
+    def _header_controls(self, on_calendar) -> list[ft.Control]:
+        """Wspólny nagłówek ekranu głównego i kalendarza: napis z hasłem oraz „Ostatni trening”, „Donate” i ikona kalendarza."""
         self.info_text = ft.Text(self._last_workout_info(), size=16, expand=True)
-        controls: list[ft.Control] = [
+        return [
             ft.Row(
                 [
                     ft.Text(
@@ -269,13 +277,18 @@ class TrainBeastApp:
                         icon_color=ACCENT,
                         style=header_btn_style(),
                         tooltip="Kalendarz",
-                        on_click=self._open_calendar,
+                        on_click=on_calendar,
                     ),
                 ],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         ]
+
+    def render(self) -> None:
+        self.set_fields = {}
+        self.set_groups = {}
+        controls = self._header_controls(self._open_calendar)
         swipe_top: list[ft.Control] = [self._day_bar()]
         if self.selected != date.today():
             swipe_top.append(ft.TextButton("Wróć do dzisiaj", height=LINK_HEIGHT, style=ft.ButtonStyle(color=ft.Colors.WHITE, padding=ft.Padding.symmetric(horizontal=12)), on_click=lambda e: self._select(date.today())))
@@ -488,98 +501,86 @@ class TrainBeastApp:
 
     # --- kalendarz ---
     def _open_calendar(self, e=None) -> None:
-        state = {"year": self.selected.year, "month": self.selected.month}
-        holder = ft.Container(
-            bgcolor=ft.Colors.WHITE,
-            border=ft.Border.all(1, CAL_TEXT),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=10),
-            width=min(380, (self.page.width or 390) - 24),
-            border_radius=10,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-        )
+        """Widok kalendarza: wspólny nagłówek + pionowa, leniwa lista miesięcy (bieżący miesiąc lub miesiąc wybranego dnia)."""
+        today = date.today()
+        months = month_range(today)
+        first = date(*months[0], 1)
+        end_year, end_month = shift_month(*months[-1], 1)
+        marked = self.service.get_workout_dates_between(first, date(end_year, end_month, 1))  # jedno zapytanie
+        grids = [month_grid(y, m) for y, m in months]
+        heights = [CAL_MONTH_FIXED + len(g) * CAL_ROW_HEIGHT for g in grids]
 
-        def pick(day: date) -> None:
-            self.page.pop_dialog()
-            self._select(day)
-
-        def move(delta: int) -> None:
-            state["year"], state["month"] = shift_month(state["year"], state["month"], delta)
-            holder.content = build()
-            holder.update()
-
-        def build() -> ft.Control:
-            year, month = state["year"], state["month"]
-            marked = self.service.get_workout_dates(year, month)  # z bazy przy każdym otwarciu/zmianie miesiąca
-            line = ft.BorderSide(1, ft.Colors.GREY_400)
-            today = date.today()
-
-            def cell(content: ft.Control, **kwargs) -> ft.Container:
-                return ft.Container(content, expand=1, alignment=ft.Alignment.CENTER, **kwargs)
-
-            header = ft.Row(
-                [
-                    ft.IconButton(ft.Icons.CHEVRON_LEFT, icon_color=CAL_TEXT, on_click=lambda e: move(-1)),
-                    ft.Text(
-                        spans=[
-                            ft.TextSpan(MONTH_NAMES[month - 1], ft.TextStyle(color=CAL_TEXT, weight=ft.FontWeight.BOLD)),
-                            ft.TextSpan(f" {year}", ft.TextStyle(color=ft.Colors.GREY_600)),
-                        ],
-                        size=20,
-                        max_lines=1,
-                        text_align=ft.TextAlign.CENTER,
-                        expand=True,
-                    ),
-                    ft.IconButton(ft.Icons.CHEVRON_RIGHT, icon_color=CAL_TEXT, on_click=lambda e: move(1)),
-                ],
-                spacing=0,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        def day_cell(day: date | None) -> ft.Control:
+            if day is None:
+                return ft.Container(expand=1, height=CAL_ROW_HEIGHT)
+            kind = classify_day(day, today, marked)
+            return ft.Container(
+                ft.Text(
+                    str(day.day),
+                    size=20,
+                    weight=ft.FontWeight.W_500,
+                    color=BLACK if kind in ("today", "workout") else CAL_SUN if kind == "sunday" else CAL_SAT if day.weekday() == 5 else ft.Colors.WHITE,
+                ),
+                expand=1,
+                height=CAL_ROW_HEIGHT,
+                alignment=ft.Alignment.CENTER,
+                bgcolor=CAL_TODAY_BG if kind == "today" else CAL_WORKOUT_BG if kind == "workout" else None,
+                on_click=lambda e, d=day: self._select(d),
             )
-            names = ft.Container(
-                ft.Row(
+
+        def month_item(i: int) -> ft.Control:
+            year, month = months[i]
+            return ft.Container(
+                ft.Column(
                     [
-                        cell(ft.Text(n, size=13, weight=ft.FontWeight.BOLD, color=day_color(i)), height=32)
-                        for i, n in enumerate(WEEKDAY_ABBR)
+                        ft.Container(
+                            ft.Text(
+                                f"{MONTH_NAMES_GENITIVE[month - 1]} {year}",
+                                size=20,
+                                weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.WHITE,
+                                max_lines=1,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                            height=CAL_TITLE_HEIGHT,
+                            alignment=ft.Alignment.CENTER,
+                        ),
+                        ft.Row(
+                            [
+                                ft.Container(
+                                    ft.Text(n, size=13, weight=ft.FontWeight.BOLD, color=day_color(k)),
+                                    expand=1,
+                                    height=CAL_WEEKDAY_HEIGHT,
+                                    alignment=ft.Alignment.CENTER,
+                                )
+                                for k, n in enumerate(WEEKDAY_ABBR)
+                            ],
+                            spacing=0,
+                        ),
+                        *[ft.Row([day_cell(d) for d in week], spacing=0) for week in grids[i]],
                     ],
                     spacing=0,
                 ),
-                border=ft.Border(top=line, bottom=line),
+                height=heights[i],
+                padding=ft.Padding.only(top=CAL_MONTH_GAP),
             )
-            rows: list[ft.Control] = [header, names]
-            for week in month_grid(year, month):
-                cells = []
-                for day in week.days:
-                    if day.month != month:
-                        cells.append(cell(ft.Text(str(day.day), size=22, color=ft.Colors.GREY_300), height=56))
-                        continue
-                    has_workout = day in marked
-                    is_today = is_calendar_today(day, month, today)
-                    cells.append(
-                        cell(
-                            ft.Text(
-                                str(day.day),
-                                size=22,
-                                weight=ft.FontWeight.W_500,
-                                color=BLACK if has_workout or is_today else day_color(day.weekday()),
-                            ),
-                            height=56,
-                            bgcolor=CAL_TODAY_BG if is_today else CAL_WORKOUT_BG if has_workout else None,
-                            on_click=lambda e, d=day: pick(d),
-                        )
-                    )
-                rows.append(ft.Container(ft.Row(cells, spacing=0), border=ft.Border(bottom=line)))
-            return swipeable(ft.Column(rows, spacing=0, tight=True), move)
 
-        holder.content = build()
-        self.page.show_dialog(
-            ft.AlertDialog(
-                content=holder,
-                bgcolor=ft.Colors.TRANSPARENT,
-                elevation=0,
-                content_padding=0,
-                inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
-                shape=ft.RoundedRectangleBorder(radius=10),
-            )
+        # miesiąc wybranego dnia (jak dawny kalendarz); poza zakresem: najbliższy brzeg listy
+        current = (self.selected.year, self.selected.month)
+        target = months.index(current) if current in months else 0 if self.selected < first else len(months) - 1
+        month_list = ft.ListView(
+            [month_item(i) for i in range(len(months))],
+            expand=True,
+            build_controls_on_demand=True,
         )
+        self._show(self._header_controls(self._close_calendar), [], month_list, gesture=False)
+        self.page.run_task(self._scroll_calendar, month_list, sum(heights[:target]))
+
+    async def _scroll_calendar(self, month_list: ft.ListView, offset: float) -> None:
+        await month_list.scroll_to(offset=offset, duration=0)
+
+    def _close_calendar(self, e=None) -> None:
+        self.render()
 
     # --- zawartość wybranego dnia ---
     def _day_content(self) -> list[ft.Control]:

@@ -475,7 +475,9 @@ from trainbeast.services import (  # noqa: E402
     fmt_decimal,
     is_valid_minsec_input,
     is_valid_weight_input,
+    classify_day,
     month_grid,
+    month_range,
     parse_floors,
     parse_reps,
     parse_weight,
@@ -533,16 +535,54 @@ def test_fmt_decimal():
     assert (fmt_decimal(80.0), fmt_decimal(2.5), fmt_decimal(7.500000001), fmt_decimal(0.1 + 0.2)) == ("80", "2.5", "7.5", "0.3")
 
 
-def test_month_grid_january_2027():
-    weeks = month_grid(2027, 1)
-    assert len(weeks) == 5
-    assert weeks[0].days[0] == date(2026, 12, 28) and weeks[-1].days[-1] == date(2027, 1, 31)
-    assert [w.iso_week for w in weeks] == [53, 1, 2, 3, 4]
-    assert all(len(w.days) == 7 for w in weeks)
+def _count_days(weeks):
+    return [d.day for w in weeks for d in w if d is not None]
 
 
-def test_month_grid_six_rows():
-    assert len(month_grid(2026, 8)) == 6
+def test_month_grid_starts_on_monday():
+    weeks = month_grid(2026, 6)  # 1 czerwca 2026 to poniedziałek
+    assert weeks[0][0] == date(2026, 6, 1)
+    assert all(len(w) == 7 for w in weeks)
+    assert _count_days(weeks) == list(range(1, 31))
+
+
+def test_month_grid_starts_on_sunday():
+    weeks = month_grid(2026, 3)  # 1 marca 2026 to niedziela
+    assert weeks[0] == [None] * 6 + [date(2026, 3, 1)]
+    assert _count_days(weeks) == list(range(1, 32))
+
+
+def test_month_grid_february_leap_and_common():
+    leap, common = month_grid(2028, 2), month_grid(2027, 2)
+    assert _count_days(leap) == list(range(1, 30))
+    assert _count_days(common) == list(range(1, 29))
+    assert len(common) == 4 and common[0][0] == date(2027, 2, 1)  # luty 2027: od poniedziałku, 28 dni
+
+
+def test_month_grid_31_days_ending_on_monday():
+    weeks = month_grid(2026, 8)  # 31 sierpnia 2026 to poniedziałek, 1 sierpnia sobota
+    assert len(weeks) == 6
+    assert weeks[0] == [None] * 5 + [date(2026, 8, 1), date(2026, 8, 2)]
+    assert weeks[-1] == [date(2026, 8, 31)] + [None] * 6
+
+
+def test_month_range_across_year_boundary():
+    months = month_range(date(2026, 10, 22))
+    assert len(months) == 49
+    assert months[0] == (2024, 10) and months[24] == (2026, 10) and months[-1] == (2028, 10)
+    assert (2026, 12) in months and months[months.index((2026, 12)) + 1] == (2027, 1)
+    assert months == sorted(months) and len(set(months)) == 49
+
+
+def test_classify_day():
+    today = date(2026, 10, 22)  # czwartek
+    sunday = date(2026, 10, 25)
+    workouts = {today, sunday, date(2026, 10, 20)}
+    assert classify_day(today, today, workouts) == "today"
+    assert classify_day(sunday, today, workouts) == "workout"
+    assert classify_day(date(2026, 10, 20), today, workouts) == "workout"
+    assert classify_day(date(2026, 11, 1), today, workouts) == "sunday"
+    assert classify_day(date(2026, 10, 21), today, workouts) == "normal"
 
 
 def test_shift_month_across_years():
@@ -561,6 +601,7 @@ def test_workout_dates_only_with_exercises(svc):
     svc.add_exercise_to_workout(other.id, ex.id)
     assert svc.get_workout_dates(2027, 1) == {date(2027, 1, 5)}
     assert svc.get_workout_dates(2027, 12) == set()
+    assert svc.get_workout_dates_between(date(2027, 1, 1), date(2027, 3, 1)) == {date(2027, 1, 5), date(2027, 2, 1)}
 
 
 @pytest.mark.parametrize("text", ["", "0", "5", "05", "99", "100", "999"])
@@ -575,19 +616,6 @@ def test_distance_input_rejected(text):
     from trainbeast.services import is_valid_distance_input
 
     assert not is_valid_distance_input(text)
-
-
-def test_calendar_today_only_in_shown_month():
-    from trainbeast.services import is_calendar_today, month_grid
-
-    today = date(2026, 10, 16)
-    days = [d for w in month_grid(2026, 10) for d in w.days]
-    assert [d for d in days if is_calendar_today(d, 10, today)] == [today]
-    assert not any(is_calendar_today(d, 11, today) for w in month_grid(2026, 11) for d in w.days)
-    # dzisiaj widoczne jako dopełnienie tygodnia sąsiedniego miesiąca nie jest zaznaczane
-    edge = date(2026, 11, 1)
-    assert edge in [d for w in month_grid(2026, 10) for d in w.days]
-    assert not is_calendar_today(edge, 10, edge)
 
 
 @pytest.mark.parametrize("text", ["", "0", "45", "007"])
