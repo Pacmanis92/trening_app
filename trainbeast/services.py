@@ -449,11 +449,14 @@ def drag_progress(dx: float, width: float, base: float = 0.0) -> float:
     return max(-1.0, min(1.0, base - dx / width))
 
 
+SWIPE_COMMIT_FRACTION = 0.15  # część szerokości ekranu, od której puszczenie palca zatwierdza zmianę dnia
+
+
 def settle_target(progress: float) -> int:
-    """Dzień docelowy po zwolnieniu palca: 1 / -1, gdy sąsiedni widok zajmuje ponad 50% szerokości, inaczej 0."""
-    if progress > 0.5:
+    """Dzień docelowy po zwolnieniu palca: 1 / -1, gdy przesunięcie wynosi co najmniej 25% szerokości, inaczej 0."""
+    if progress >= SWIPE_COMMIT_FRACTION:
         return 1
-    if progress < -0.5:
+    if progress <= -SWIPE_COMMIT_FRACTION:
         return -1
     return 0
 

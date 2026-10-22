@@ -461,7 +461,7 @@ class TrainBeastApp:
         await self._settle(0.0)
 
     async def _settle(self, velocity: float) -> None:
-        """Dokańcza ruch do 0 / ±1 wg reguły 50%; tę samą klatkę dostają widok treningu i taśma dni."""
+        """Dokańcza ruch do 0 / ±1 wg reguły 25%; tę samą klatkę dostają widok treningu i taśma dni."""
         self._anim_gen += 1
         gen = self._anim_gen
         start, target = self._progress, settle_target(self._progress)

@@ -32,9 +32,10 @@ def test_drag_progress_continues_from_base_and_handles_zero_width():
 
 @pytest.mark.parametrize(
     "progress, expected",
-    [(0.0, 0), (0.3, 0), (0.5, 0), (0.5001, 1), (0.9, 1), (1.0, 1), (-0.5, 0), (-0.5001, -1), (-1.0, -1)],
+    [(0.0, 0), (0.2, 0), (0.2499, 0), (0.25, 1), (0.2501, 1), (0.9, 1), (1.0, 1),
+     (-0.2499, 0), (-0.25, -1), (-0.2501, -1), (-1.0, -1)],
 )
-def test_settle_target_50_percent_rule(progress, expected):
+def test_settle_target_25_percent_rule(progress, expected):
     assert settle_target(progress) == expected
 
 
@@ -139,7 +140,7 @@ def test_swipe_left_moves_both_views_and_commits_next_day(app):
         # ponowny ruch kontynuuje
         app._on_drag_update(drag_update(50))  # -150 px => 50%
         assert app._progress == pytest.approx(0.5)
-        app._on_drag_update(drag_update(40))  # 53% => przekroczone 50%
+        app._on_drag_update(drag_update(40))  # 53% => przekroczone 25%
         await app._on_drag_end(drag_end(-100))
 
     asyncio.run(scenario())
@@ -162,13 +163,13 @@ def test_swipe_right_goes_back_over_year_boundary(app):
     assert app.selected == date(2025, 12, 31)
 
 
-def test_release_before_half_returns_to_current_day(app):
+def test_release_below_25_percent_returns_to_current_day(app):
     day = app.selected
 
     async def scenario():
         app._on_drag_start(drag_start(200))
-        app._on_drag_update(drag_update(50))  # -150 px = dokładnie 50% => aktualny dzień
-        await app._on_drag_end(drag_end(-3000))  # nawet szybki gest nie łamie reguły 50%
+        app._on_drag_update(drag_update(200 - 0.24 * app._panel_width))  # 24% => aktualny dzień
+        await app._on_drag_end(drag_end(-3000))  # nawet szybki gest nie łamie reguły 25%
 
     asyncio.run(scenario())
     assert app.selected == day
@@ -254,3 +255,19 @@ def test_next_day_month_boundaries():
     assert date(2026, 2, 28) + timedelta(days=1) == date(2026, 3, 1)
     assert date(2028, 2, 28) + timedelta(days=1) == date(2028, 2, 29)
     assert date(2026, 12, 31) + timedelta(days=1) == date(2027, 1, 1)
+
+
+@pytest.mark.parametrize("fraction, direction", [(0.25, 1), (0.30, 1), (-0.25, -1), (-0.30, -1), (0.24, 0), (-0.24, 0)])
+def test_release_threshold_in_ui(app, fraction, direction):
+    app.selected = date(2026, 10, 25)
+    app.render()
+    app._panel_width = 400.0
+
+    async def scenario():
+        app._on_drag_start(drag_start(200))
+        app._on_drag_update(drag_update(200 - fraction * 400.0))
+        await app._on_drag_end(drag_end())
+
+    asyncio.run(scenario())
+    assert app.selected == date(2026, 10, 25) + timedelta(days=direction)
+    assert app._progress == 0.0

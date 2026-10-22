@@ -4,3 +4,4 @@ __pycache__/
 .build
 # Pliki APK
 build/apk/*.apk
+build/apk/*.sha1
