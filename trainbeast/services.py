@@ -1,7 +1,8 @@
 import calendar
+import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
 from sqlalchemy import delete, func, select
@@ -417,6 +418,7 @@ MONTH_NAMES_GENITIVE = (
 )
 CALENDAR_MONTHS_BACK = 24
 CALENDAR_MONTHS_FORWARD = 24
+STATS_MONTHS = 24  # wykres liczby treningów: ostatnie 2 lata
 
 
 def month_grid(year: int, month: int) -> list[list[date | None]]:
@@ -686,6 +688,38 @@ class TrainingService:
                 )
             )
 
+    # --- statystyki (tylko odczyt) ---
+    def get_exercise_set_rows(self, exercise_id: int) -> list["SetRow"]:
+        """Wszystkie wykonane serie ćwiczenia z datą treningu - jedno zapytanie."""
+        with self._sf() as s:
+            stmt = (
+                select(
+                    Workout.workout_date,
+                    WorkoutSet.weight_kg,
+                    WorkoutSet.distance_m,
+                    WorkoutSet.reps,
+                    WorkoutSet.duration_s,
+                    WorkoutSet.unit,
+                    WorkoutSet.unit_minor,
+                    WorkoutSet.done,
+                )
+                .join(WorkoutExercise, WorkoutExercise.id == WorkoutSet.workout_exercise_id)
+                .join(Workout, Workout.id == WorkoutExercise.workout_id)
+                .where(WorkoutExercise.exercise_id == exercise_id, WorkoutSet.done.is_(True))
+            )
+            return [SetRow(*row) for row in s.execute(stmt)]
+
+    def get_exercise_daily_stats(self, exercise: Exercise) -> dict[date, "DailyStats"]:
+        rows = self.get_exercise_set_rows(exercise.id)
+        return aggregate_daily(exercise.load_type, exercise.effort_type, rows)
+
+    def get_monthly_workout_counts(self, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
+        """Liczba dni z treningiem (jak w kalendarzu) w każdym z ostatnich `months` miesięcy; jedno zapytanie."""
+        first_year, first_month = shift_month(today.year, today.month, -(months - 1))
+        end_year, end_month = shift_month(today.year, today.month, 1)
+        dates = self.get_workout_dates_between(date(first_year, first_month, 1), date(end_year, end_month, 1))
+        return monthly_workout_counts(dates, today, months)
+
     def get_last_workout(self, today: date | None = None) -> Workout | None:
         """Najnowszy trening z datą ściśle wcześniejszą niż dziś, który ma co najmniej jedno ćwiczenie."""
         with self._sf() as s:
@@ -889,6 +923,162 @@ class TrainingService:
                 s.delete(ws)
 
 
+# --- statystyki ćwiczenia (czysta logika, bez UI i bazy) ---
+LBS_TO_KG = 0.45359237
+MILE_TO_KM = 1.609344
+YARD_TO_M = 0.9144
+STATS_RANGE_DAYS = {"month": 30, "week": 7}
+
+
+def lbs_to_kg(value: float) -> float:
+    return value * LBS_TO_KG
+
+
+def distance_to_km(major: float, minor: float = 0, unit: str | None = None, unit_minor: str | None = None) -> float:
+    """Pole km/mile plus pole m/ys podzielone przez 1000; brak jednostki = bazowa (km, m)."""
+    km = major * (MILE_TO_KM if unit == "mile" else 1)
+    metres = minor * (YARD_TO_M if unit_minor == "ys" else 1)
+    return km + metres / 1000
+
+
+def hms_to_minutes(h: float, minutes: float, seconds: float) -> float:
+    return h * 60 + minutes + seconds / 60
+
+
+class SetRow(NamedTuple):
+    """Seria w postaci surowych wartości z bazy (do statystyk)."""
+
+    day: date
+    weight_kg: float | None
+    distance_m: int | None
+    reps: int | None
+    duration_s: int | None
+    unit: str | None
+    unit_minor: str | None
+    done: bool
+
+
+class DailyStats(NamedTuple):
+    w1: float  # łącznie podniesione / zrobione
+    w2: float  # największa wartość pierwszej miary w jednej serii
+    w3: float  # druga miara łącznie (powtórzenia lub minuty)
+
+
+class Record(NamedTuple):
+    value: float
+    day: date
+
+
+class StatTitles(NamedTuple):
+    w1: str
+    w2: str
+    w3: str
+    unit1: str  # jednostki rekordów W1, W2 i W3
+    unit2: str
+    unit3: str
+
+
+# jedna tabela napisów i jednostek: pierwsza miara -> (tytuł W1, tytuł W2, jednostka W1/W2)
+STAT_FIRST_TITLES = {
+    "weight": ("Łączny ciężar (kg)", "Największy ciężar (kg)", "kg"),
+    "distance": ("Łączny dystans (km)", "Największy dystans (km)", "km"),
+    "reps": ("Łączna liczba powtórzeń", "Najwięcej powtórzeń w serii", "powt."),
+    "floors": ("Łączna liczba pięter", "Najwięcej pięter w serii", "pięt."),
+}
+STAT_SECOND_TITLES = {"reps": ("Powtórzenia", "powt."), "time": ("Czas (min)", "min")}
+
+
+def stat_titles(load_type: str, effort_type: str) -> StatTitles:
+    w1, w2, unit = STAT_FIRST_TITLES[load_type]
+    w3, unit3 = STAT_SECOND_TITLES[effort_type]
+    return StatTitles(w1, w2, w3, unit, unit, unit3)
+
+
+def _set_values(load_type: str, effort_type: str, row: SetRow) -> tuple[float, float]:
+    """(pierwsza miara w kg / km / powt. / piętrach, druga miara w powt. / minutach) po przeliczeniu jednostek."""
+    if load_type == "weight":
+        first = row.weight_kg or 0.0
+        if row.unit == "lbs":
+            first = lbs_to_kg(first)
+    elif load_type == "distance":
+        km, m = divmod(row.distance_m or 0, 1000)
+        first = distance_to_km(km, m, row.unit, row.unit_minor)
+    else:  # powtórzenia i piętra są zapisane w polu reps
+        first = float(row.reps or 0)
+    if effort_type == "reps":
+        second = float(row.reps or 0)
+    else:
+        second = (row.duration_s or 0) / 60
+    return first, second
+
+
+def aggregate_daily(load_type: str, effort_type: str, rows) -> dict[date, DailyStats]:
+    """Wartości dzienne W1, W2, W3 z wykonanych serii (niewykonane są pomijane)."""
+    # piętra × powtórzenia dzielą pole reps z drugą miarą: mnożenie dałoby kwadrat, więc W1 to suma pięter
+    multiply = effort_type == "reps" and load_type in ("weight", "distance")
+    days: dict[date, list[float]] = {}
+    for row in rows:
+        if not row.done:
+            continue
+        first, second = _set_values(load_type, effort_type, row)
+        acc = days.setdefault(row.day, [0.0, 0.0, 0.0])
+        acc[0] += first * second if multiply else first
+        acc[1] = max(acc[1], first)
+        acc[2] += second
+    return {day: DailyStats(*acc) for day, acc in days.items()}
+
+
+def stats_series(daily: dict[date, DailyStats], today: date, days: int) -> list[tuple[date, DailyStats]]:
+    """Punkt na każdy z ostatnich `days` dni (ostatni = dzisiaj); dni bez danych mają zera."""
+    empty = DailyStats(0.0, 0.0, 0.0)
+    result = []
+    for back in range(days - 1, -1, -1):
+        day = today - timedelta(days=back)
+        result.append((day, daily.get(day, empty)))
+    return result
+
+
+def stats_records(daily: dict[date, DailyStats]) -> tuple[Record | None, Record | None, Record | None]:
+    """Rekordy W1, W2, W3 z całej historii; remis -> najwcześniejsza data; same zera -> None."""
+    records: list[Record | None] = []
+    for index in range(3):
+        best: Record | None = None
+        for day in sorted(daily):
+            value = daily[day][index]
+            if value > 0 and (best is None or value > best.value):
+                best = Record(value, day)
+        records.append(best)
+    return records[0], records[1], records[2]
+
+
+def monthly_workout_counts(workout_dates, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
+    """Liczba dni z treningiem w każdym z ostatnich `months` miesięcy (bieżący ostatni); puste miesiące = 0."""
+    keys = [shift_month(today.year, today.month, -back) for back in range(months - 1, -1, -1)]
+    counts = dict.fromkeys(keys, 0)
+    for day in set(workout_dates):
+        key = (day.year, day.month)
+        if key in counts:
+            counts[key] += 1
+    return [(key, counts[key]) for key in keys]
+
+
+def axis_label_indices(count: int, step: int) -> list[int]:
+    """Indeksy punktów z etykietą osi: co `step`, licząc od ostatniego punktu wstecz."""
+    return [i for i in range(count) if (count - 1 - i) % step == 0]
+
+
+def fmt_stat_number(value: float) -> str:
+    """Maksymalnie 2 miejsca po przecinku, bez zbędnych zer."""
+    text = f"{round(value, 2):.2f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def fmt_record(record: Record | None, unit: str) -> str:
+    if record is None:
+        return "Brak danych"
+    return f"Rekord: {fmt_stat_number(record.value)} {unit} ({record.day.strftime('%d.%m.%Y')})"
+
+
 # --- pomocnicze (na pobranych, odłączonych obiektach) ---
 def has_snapshot_to_paste(snapshot: WorkoutSnapshot | None) -> bool:
     """Czy w pamięci jest skopiowany trening, który można wkleić."""
@@ -897,3 +1087,17 @@ def has_snapshot_to_paste(snapshot: WorkoutSnapshot | None) -> bool:
 
 def done_sets_count(workout: Workout) -> int:
     return sum(1 for we in workout.exercises for st in we.sets if st.done)
+
+
+def y_axis_ticks(max_value: float, integer: bool = False, target: int = 4) -> tuple[float, list[float]]:
+    """Skala osi Y od 0: (górna granica, wartości etykiet). Krok „ładny” (1, 2, 2,5, 5 × 10^k); dla liczb całkowitych krok >= 1."""
+    if max_value <= 0:
+        return 1, [0, 1]
+    raw = max_value / target
+    base = 10 ** math.floor(math.log10(raw))
+    step = next(m * base for m in (1, 2, 2.5, 5, 10) if m * base >= raw)
+    if integer:
+        step = max(1, math.ceil(step))
+    count = math.ceil(round(max_value / step, 9))
+    ticks = [round(i * step, 6) for i in range(count + 1)]
+    return ticks[-1], ticks

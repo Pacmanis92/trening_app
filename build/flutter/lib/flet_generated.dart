@@ -8,6 +8,8 @@ import 'dart:convert';
 import 'package:flet/flet.dart';
 
 
+import 'package:flet_charts/flet_charts.dart' as flet_charts;
+
 
 
 
@@ -24,5 +26,7 @@ final bootScreenOptions = (jsonDecode(utf8
     .cast<String, dynamic>();
 
 List<FletExtension> extensions = [
+
+  flet_charts.Extension(),
 
 ];

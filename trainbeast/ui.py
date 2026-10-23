@@ -3,9 +3,11 @@ import time
 from datetime import date, timedelta
 
 import flet as ft
+import flet_charts as fch
 
 from .services import (
     EMPTY_SUMMARY,
+    STATS_RANGE_DAYS,
     MONTH_NAMES_GENITIVE,
     WEEKDAY_ABBR,
     TrainingService,
@@ -13,9 +15,12 @@ from .services import (
     SummaryGroup,
     WorkoutSnapshot,
     allowed_units,
+    axis_label_indices,
     done_sets_count,
     has_snapshot_to_paste,
     fmt_decimal,
+    fmt_record,
+    fmt_stat_number,
     fmt_set_line,
     day_tape_layout,
     drag_progress,
@@ -36,8 +41,12 @@ from .services import (
     settle_duration,
     settle_target,
     shift_month,
+    stat_titles,
+    stats_records,
+    stats_series,
     summarize_exercise,
     weekday_abbr,
+    y_axis_ticks,
 )
 
 BTN_HEIGHT = 60
@@ -85,6 +94,14 @@ EDIT_BTN_GAP = 12  # dodatkowy odstęp między ostatnią serią a wierszem przyc
 HEADER_BTN_HEIGHT = 48  # wysokość ikony kalendarza (32 + 2 * 8); „Donate" ma tę samą
 HEADER_BTN_RADIUS = 10  # zaokrąglenie ikony kalendarza i „Donate"
 HEADER_BTN_BORDER = ft.BorderSide(1, ACCENT)  # ramka ikony kalendarza i „Donate"
+TAB_BAR_HEIGHT = 48
+TAB_SPACER = 16  # odstęp na dole przewijanych list nad paskiem zakładek
+STATS_CARD_BG = "#272a2f"
+STATS_CHART_HEIGHT = 210
+STATS_CHART_LABEL_SIZE = 10
+STATS_LEFT_AXIS_WIDTH = 44
+INTERVAL_WIDTH = 124
+INTERVAL_LABELS = {"month": "Miesięczny", "week": "Tygodniowy"}
 DONATE_WIDTH = 64  # trochę szerszy niż kalendarz (48), napis „Donate" mieści się w jednym wierszu
 
 
@@ -172,6 +189,10 @@ class TrainBeastApp:
         self.set_groups: dict[int, list[tuple[str, list[ft.TextField]]]] = {}
         self.expanded: set[int] = set()  # karty w trybie edycji (tylko UI)
         self.snapshot: WorkoutSnapshot | None = None  # skopiowany trening (tylko w pamięci)
+        self.tab = "workout"
+        self.stats_exercise = None  # wybrane ćwiczenie w zakładce Statystyki (tylko UI)
+        self.stats_interval = "month"
+        self._info_texts: dict[str, ft.Text] = {}
         self._reset_swipe()
 
         page.title = "TrainBeast"
@@ -180,6 +201,21 @@ class TrainBeastApp:
         if page.platform in (ft.PagePlatform.WINDOWS, ft.PagePlatform.MACOS, ft.PagePlatform.LINUX):
             page.window.width = 390  # tylko podgląd na komputerze
             page.window.height = 844
+        self.workout_host = ft.Container(expand=True)
+        self.stats_host = ft.Container(expand=True, bgcolor=BLACK, visible=False)
+        self._stats_built = False
+        self._tab_labels: dict[str, ft.Text] = {}
+        page.add(
+            ft.SafeArea(
+                expand=True,
+                content=ft.Column(
+                    [self.workout_host, self.stats_host, self._tab_bar()],
+                    expand=True,
+                    spacing=0,
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                ),
+            )
+        )
         self.render()
 
     # --- infrastruktura ---
@@ -201,31 +237,25 @@ class TrainBeastApp:
                 on_horizontal_drag_end=self._on_drag_end,
                 on_horizontal_drag_cancel=self._on_drag_cancel,
             )
-        self.page.controls.clear()
-        self.page.add(
-            ft.SafeArea(
-                expand=True,
-                content=ft.Container(
-                    padding=SCREEN_MARGIN,
-                    expand=True,
-                    content=ft.Column(
-                        [
-                            ft.Container(
-                                bgcolor=BLACK,
-                                content=ft.Column(
-                                    list(header),
-                                    spacing=12,
-                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                                ),
-                            ),
-                            body,
-                        ],
-                        expand=True,
-                        spacing=12,
-                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        self.workout_host.content = ft.Container(
+            padding=SCREEN_MARGIN,
+            expand=True,
+            content=ft.Column(
+                [
+                    ft.Container(
+                        bgcolor=BLACK,
+                        content=ft.Column(
+                            list(header),
+                            spacing=12,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
                     ),
-                ),
-            )
+                    body,
+                ],
+                expand=True,
+                spacing=12,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
         )
         self.page.update()
 
@@ -235,10 +265,223 @@ class TrainBeastApp:
     def _dialog(self, title: str, content: ft.Control | None, actions: list[ft.Control], **kwargs) -> None:
         self.page.show_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions, **kwargs))
 
+    # --- zakładki ---
+    def _tab_bar(self) -> ft.Control:
+        def tab(key: str, title: str) -> ft.Control:
+            label = self._tab_labels[key] = ft.Text(
+                title,
+                size=16,
+                color=ft.Colors.WHITE,
+                weight=ft.FontWeight.BOLD if key == self.tab else ft.FontWeight.NORMAL,
+            )
+            return ft.Container(
+                label,
+                expand=1,
+                height=TAB_BAR_HEIGHT,
+                alignment=ft.Alignment.CENTER,
+                on_click=lambda e, k=key: self._switch_tab(k),
+            )
+
+        return ft.Container(
+            ft.Row([tab("workout", "Workout"), tab("stats", "Statystyki")], spacing=0),
+            bgcolor=BTN_FILL,  # to samo wypełnienie co „Podsumowanie ćwiczenia”
+            height=TAB_BAR_HEIGHT,
+        )
+
+    def _switch_tab(self, key: str) -> None:
+        """Przełącza zakładki przez ukrywanie i pokazywanie (stan obu widoków zostaje)."""
+        if key == "stats" and not self._stats_built:
+            self._build_stats_view()
+        self.tab = key
+        self.workout_host.visible = key == "workout"
+        self.stats_host.visible = key == "stats"
+        for k, label in self._tab_labels.items():
+            label.weight = ft.FontWeight.BOLD if k == key else ft.FontWeight.NORMAL
+        if key == "stats":
+            self._refresh_stats(update=False)
+        self.page.update()
+
+    def _open_calendar_from_stats(self, e=None) -> None:
+        self._switch_tab("workout")
+        self._open_calendar()
+
+    # --- statystyki ---
+    def _build_stats_view(self) -> None:
+        self._stats_built = True
+        self.stats_exercise_text = ft.Text(
+            "Wybierz ćwiczenie",
+            size=16,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        exercise_box = ft.Container(
+            self.stats_exercise_text,
+            height=NAME_ROW_HEIGHT,
+            expand=True,
+            padding=ft.Padding.symmetric(horizontal=12),
+            alignment=ft.Alignment.CENTER_LEFT,
+            bgcolor=FILL_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=CARD_RADIUS,
+            on_click=lambda e: self._open_exercise_picker(self._pick_stats_exercise, editable=False),
+        )
+        self.stats_interval_text = ft.Text(INTERVAL_LABELS[self.stats_interval], size=14, max_lines=1)
+        interval_box = ft.Container(
+            ft.PopupMenuButton(
+                content=ft.Container(
+                    ft.Row(
+                        [self.stats_interval_text, ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=18, color=ACCENT)],
+                        spacing=0,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    width=INTERVAL_WIDTH - 2,
+                    height=NAME_ROW_HEIGHT - 2,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                items=self._menu_items(list(INTERVAL_LABELS.values()), self._choose_interval),
+                bgcolor=FILL_DARK,
+                shape=ft.RoundedRectangleBorder(side=ft.BorderSide(1, ACCENT), radius=CARD_RADIUS),
+                padding=0,
+            ),
+            width=INTERVAL_WIDTH,
+            height=NAME_ROW_HEIGHT,
+            bgcolor=FILL_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=CARD_RADIUS,
+        )
+        self.stats_charts = ft.Column(
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=12,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        self.stats_host.content = ft.Container(
+            padding=SCREEN_MARGIN,
+            expand=True,
+            content=ft.Column(
+                [
+                    ft.Column(
+                        self._header_controls(self._open_calendar_from_stats, owner="stats"),
+                        spacing=12,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                    ft.Row([exercise_box, interval_box], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    self.stats_charts,
+                ],
+                expand=True,
+                spacing=12,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+        )
+
+    def _pick_stats_exercise(self, exercise_id: int) -> None:
+        self.stats_exercise = next((x for x in self.service.list_exercises() if x.id == exercise_id), None)
+        self.page.pop_dialog()
+        self._refresh_stats()
+
+    def _choose_interval(self, label: str) -> None:
+        self.stats_interval = next(k for k, v in INTERVAL_LABELS.items() if v == label)
+        self._refresh_stats()
+
+    def _refresh_stats(self, update: bool = True) -> None:
+        """Pobiera dane na nowo i przebudowuje wykresy (przy wejściu w zakładkę i przy zmianie ćwiczenia lub interwału)."""
+        today = date.today()
+        self._info_texts["stats"].value = self._last_workout_info()
+        exercise = self.stats_exercise
+        self.stats_exercise_text.value = exercise.name if exercise else "Wybierz ćwiczenie"
+        self.stats_exercise_text.color = None if exercise else ft.Colors.ON_SURFACE_VARIANT
+        self.stats_interval_text.value = INTERVAL_LABELS[self.stats_interval]
+        cards: list[ft.Control] = []
+        if exercise is not None:
+            daily = self.service.get_exercise_daily_stats(exercise)
+            series = stats_series(daily, today, STATS_RANGE_DAYS[self.stats_interval])
+            labels = [fmt_short(day) for day, _ in series]
+            step = 1 if len(series) <= 7 else 5
+            titles = stat_titles(exercise.load_type, exercise.effort_type)
+            records = stats_records(daily)
+            for index, (title, unit) in enumerate(zip(titles[:3], titles[3:])):
+                cards.append(
+                    self._chart_card(
+                        title,
+                        [(i, values[index]) for i, (day, values) in enumerate(series) if day in daily],  # tylko dni z treningiem
+                        labels,
+                        step,
+                        fmt_record(records[index], unit),
+                    )
+                )
+        counts = self.service.get_monthly_workout_counts(today)
+        cards.append(
+            self._chart_card(
+                "Treningi w miesiącu (ostatnie 2 lata)",
+                [(i, count) for i, (_, count) in enumerate(counts)],
+                [f"{m:02d}.{y % 100:02d}" for (y, m), _ in counts],
+                3,
+                None,
+                integer=True,
+            )
+        )
+        cards.append(ft.Container(height=TAB_SPACER))
+        self.stats_charts.controls = cards
+        if update:
+            self.page.update()
+
+    @staticmethod
+    def _chart_card(title: str, points: list[tuple[int, float]], labels: list[str], step: int, record: str | None, integer: bool = False) -> ft.Control:
+        """Karta z tytułem, wykresem liniowym (punkty: indeks na osi X i wartość) i opcjonalnym napisem z rekordem."""
+        top, ticks = y_axis_ticks(max((v for _, v in points), default=0), integer=integer)
+
+        def axis_label(text: str) -> ft.Text:
+            return ft.Text(text, size=STATS_CHART_LABEL_SIZE, color=ft.Colors.WHITE, max_lines=1)
+
+        chart = fch.LineChart(
+            data_series=[] if not points else [
+                fch.LineChartData(
+                    points=[fch.LineChartDataPoint(i, v) for i, v in points],
+                    color=ACCENT,
+                    stroke_width=2,
+                    curved=False,
+                    point=fch.ChartCirclePoint(color=ACCENT, radius=2.5),
+                )
+            ],
+            min_x=0,
+            max_x=max(len(labels) - 1, 1),
+            min_y=0,
+            max_y=top,
+            interactive=False,
+            left_axis=fch.ChartAxis(
+                labels=[fch.ChartAxisLabel(value=t, label=axis_label(fmt_stat_number(t))) for t in ticks],
+                label_size=STATS_LEFT_AXIS_WIDTH,
+                show_min=False,
+                show_max=False,
+            ),
+            bottom_axis=fch.ChartAxis(
+                labels=[fch.ChartAxisLabel(value=i, label=axis_label(labels[i])) for i in axis_label_indices(len(labels), step)],
+                label_size=24,
+                show_min=False,
+                show_max=False,
+            ),
+            top_axis=fch.ChartAxis(show_labels=False),
+            right_axis=fch.ChartAxis(show_labels=False),
+            height=STATS_CHART_HEIGHT,
+        )
+        rows: list[ft.Control] = [
+            ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+            ft.Container(chart, padding=ft.Padding.only(right=12, top=8)),
+        ]
+        if record is not None:
+            rows.append(ft.Text(record, size=14, color=ft.Colors.WHITE))
+        return ft.Container(
+            ft.Column(rows, spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+            padding=12,
+            bgcolor=STATS_CARD_BG,
+            border_radius=CARD_RADIUS,
+        )
+
     # --- główny widok ---
-    def _header_controls(self, on_calendar) -> list[ft.Control]:
+    def _header_controls(self, on_calendar, owner: str = "workout") -> list[ft.Control]:
         """Wspólny nagłówek ekranu głównego i kalendarza: napis z hasłem oraz „Ostatni trening”, „Donate” i ikona kalendarza."""
-        self.info_text = ft.Text(self._last_workout_info(), size=16, expand=True)
+        self.info_text = self._info_texts[owner] = ft.Text(self._last_workout_info(), size=16, expand=True)
         return [
             ft.Row(
                 [
@@ -304,6 +547,7 @@ class TrainBeastApp:
         )
 
     def _refresh_info(self) -> None:
+        self.info_text = self._info_texts.get("workout", self.info_text)
         self.info_text.value = self._last_workout_info()
         self.info_text.update()
 
@@ -410,7 +654,7 @@ class TrainBeastApp:
     @staticmethod
     def _make_panel(controls: list[ft.Control]) -> ft.Container:
         return ft.Container(
-            ft.Column(list(controls), scroll=ft.ScrollMode.AUTO, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+            ft.Column([*controls, ft.Container(height=TAB_SPACER)], scroll=ft.ScrollMode.AUTO, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             bgcolor=BLACK,  # tło: panel zasłania sąsiada i przyjmuje dotyk w pustych miejscach
             left=0,
             right=0,
@@ -572,6 +816,7 @@ class TrainBeastApp:
             [month_item(i) for i in range(len(months))],
             expand=True,
             build_controls_on_demand=True,
+            padding=ft.Padding.only(bottom=TAB_SPACER),
         )
         self._show(self._header_controls(self._close_calendar), [], month_list, gesture=False)
         self.page.run_task(self._scroll_calendar, month_list, sum(heights[:target]))
@@ -869,9 +1114,13 @@ class TrainBeastApp:
 
     @staticmethod
     def _unit_menu_items(measure: str, choose) -> list[ft.PopupMenuItem]:
-        """Pozycje listy jednostek rozdzielone żółtymi liniami (bez linii nad pierwszą i pod ostatnią)."""
+        return TrainBeastApp._menu_items(allowed_units(measure), choose)
+
+    @staticmethod
+    def _menu_items(options, choose) -> list[ft.PopupMenuItem]:
+        """Pozycje listy rozdzielone żółtymi liniami (bez linii nad pierwszą i pod ostatnią)."""
         items: list[ft.PopupMenuItem] = []
-        for u in allowed_units(measure):
+        for u in options:
             if items:
                 items.append(
                     ft.PopupMenuItem(content=ft.Container(height=1, width=UNIT_MENU_WIDTH, bgcolor=ACCENT), height=1, padding=0)
@@ -1126,19 +1375,23 @@ class TrainBeastApp:
         )
 
     def _open_add_exercise(self, e=None) -> None:
+        self._open_exercise_picker(self._add_exercise_to_workout, editable=True)
+
+    def _add_exercise_to_workout(self, exercise_id: int) -> None:
+        try:
+            we = self.service.add_exercise_to_workout(self.workout_id, exercise_id)
+        except ValidationError as err:
+            self._toast(str(err))
+            return
+        self.expanded.add(we.id)  # nowe ćwiczenie od razu w trybie edycji
+        self.page.pop_dialog()
+        self.render()
+
+    def _open_exercise_picker(self, on_pick, editable: bool) -> None:
+        """Lista ćwiczeń wspólna dla treningu i statystyk; editable=False ukrywa „Dodaj własne” i „Dodaj sekcję”."""
         expanded: set[str] = set()  # rozwinięte kategorie/sekcje (tylko UI, domyślnie wszystkie zwinięte)
         width = min(400, (self.page.width or 390) - 48)
         items = ft.Column(scroll=ft.ScrollMode.AUTO, width=width, spacing=8)
-
-        def add(exercise_id: int):
-            try:
-                we = self.service.add_exercise_to_workout(self.workout_id, exercise_id)
-            except ValidationError as err:
-                self._toast(str(err))
-                return
-            self.expanded.add(we.id)  # nowe ćwiczenie od razu w trybie edycji
-            self.page.pop_dialog()
-            self.render()
 
         def toggle(name: str):
             expanded.symmetric_difference_update({name})
@@ -1172,32 +1425,24 @@ class TrainBeastApp:
                             bgcolor=FILL_DARK,
                             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
                             border_radius=8,
-                            on_click=lambda e, exid=ex.id: add(exid),
+                            on_click=lambda e, exid=ex.id: on_pick(exid),
                         )
                     )
-                controls.append(
-                    ft.Row(
-                        [
-                            own_button(
-                                "Dodaj własne",
-                                lambda e, n=name: self._open_create_exercise(n, on_created=refresh),
-                                expand=1,
-                            ),
-                            ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, style=delete_style(), on_click=lambda e, n=name: toggle(n)),
-                        ],
-                        spacing=8,
-                    )
-                )
+                buttons = [ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, style=delete_style(), on_click=lambda e, n=name: toggle(n))]
+                if editable:
+                    buttons.insert(0, own_button("Dodaj własne", lambda e, n=name: self._open_create_exercise(n, on_created=refresh), expand=1))
+                controls.append(ft.Row(buttons, spacing=8))
             return controls
 
         def fill():
             items.controls = []
             for category in self.service.get_categories():
                 items.controls.extend(category_controls(category.name))
-            items.controls.append(ft.Divider())
-            items.controls.append(
-                own_button("Dodaj sekcję", lambda e: self._open_add_section(on_created=refresh))
-            )
+            if editable:
+                items.controls.append(ft.Divider())
+                items.controls.append(
+                    own_button("Dodaj sekcję", lambda e: self._open_add_section(on_created=refresh))
+                )
 
         def refresh():
             fill()

@@ -228,7 +228,7 @@ def test_neighbour_preview_does_not_touch_current_view_state(app):
 
 
 def test_date_bar_frame_is_static_and_tape_is_clipped(app):
-    bar = app.page.controls[0].content.content.controls[1].content.controls[0]  # kontener paska dni
+    bar = app.workout_host.content.content.controls[1].content.controls[0]  # kontener paska dni
     frame = bar
     row = frame.content
     window = row.controls[1]

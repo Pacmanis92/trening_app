@@ -1,6 +1,8 @@
 dependencies:
   cupertino_icons: ^1.0.8
   flet: 1.0.4
+  flet_charts:
+    path: C:\Users\HARDPC\PythonProjects\trening_app\build\flutter-packages\flet_charts
   flutter:
     sdk: flutter
   flutter_web_plugins:
