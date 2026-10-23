@@ -9,11 +9,9 @@ from trainbeast.services import (
     period_second_stats,
     SetRow,
     aggregate_daily,
-    axis_label_indices,
     distance_to_km,
     hms_to_minutes,
     lbs_to_kg,
-    monthly_workout_counts,
     stat_titles,
 )
 
@@ -77,42 +75,6 @@ def test_titles():
     assert stat_titles("distance", "reps").w2 == "Najdłuższy pojedynczy dystans dnia (km)"
     assert stat_titles("reps", "reps").w2 == "Najwięcej powtórzeń w serii"  # bez zmian
     assert stat_titles("weight", "reps").w3 == "Powtórzenia"
-
-
-def test_axis_label_indices():
-    assert axis_label_indices(7, 1) == list(range(7))
-    idx = axis_label_indices(30, 5)
-    assert idx[-1] == 29 and len(idx) == 6
-
-
-def test_monthly_counts_year_boundary_and_current_month():
-    today = date(2026, 2, 10)
-    dates = {date(2026, 2, 1), date(2026, 2, 10), date(2025, 12, 31), date(2025, 1, 5), date(2024, 3, 1)}
-    result = monthly_workout_counts(dates, today)
-    assert len(result) == 24
-    assert result[0][0] == (2024, 3) and result[-1][0] == (2026, 2)
-    counts = dict(result)
-    assert counts[(2026, 2)] == 2
-    assert counts[(2025, 12)] == 1
-    assert counts[(2026, 1)] == 0
-    assert counts[(2025, 1)] == 1
-    assert counts[(2024, 3)] == 1
-    assert (2024, 2) not in counts
-
-
-def test_service_monthly_counts_matches_calendar(tmp_path):
-    from trainbeast.database import make_engine, make_session_factory
-    from trainbeast.services import TrainingService
-
-    svc = TrainingService(make_session_factory(make_engine(f"sqlite:///{tmp_path / 't.db'}")))
-    today = date(2026, 10, 22)
-    ex = svc.list_exercises()[0]
-    w = svc.create_workout(today)
-    svc.add_exercise_to_workout(w.id, ex.id)
-    svc.create_workout(date(2026, 9, 3))  # pusty trening nie liczy się (jak w kalendarzu)
-    counts = svc.get_monthly_workout_counts(today)
-    assert counts[-1] == ((2026, 10), 1)
-    assert dict(counts)[(2026, 9)] == 0
 
 
 def test_service_daily_stats_one_exercise(tmp_path):

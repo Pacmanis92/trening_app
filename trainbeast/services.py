@@ -419,7 +419,6 @@ MONTH_NAMES_GENITIVE = (
 )
 CALENDAR_MONTHS_BACK = 24
 CALENDAR_MONTHS_FORWARD = 24
-STATS_MONTHS = 24  # wykres liczby treningów: ostatnie 2 lata
 
 
 def month_grid(year: int, month: int) -> list[list[date | None]]:
@@ -724,12 +723,33 @@ class TrainingService:
         with self._sf() as s:
             return s.scalar(select(func.min(Workout.workout_date)).where(Workout.exercises.any()))
 
-    def get_monthly_workout_counts(self, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
-        """Liczba dni z treningiem (jak w kalendarzu) w każdym z ostatnich `months` miesięcy; jedno zapytanie."""
-        first_year, first_month = shift_month(today.year, today.month, -(months - 1))
-        end_year, end_month = shift_month(today.year, today.month, 1)
-        dates = self.get_workout_dates_between(date(first_year, first_month, 1), date(end_year, end_month, 1))
-        return monthly_workout_counts(dates, today, months)
+    def get_last_done_workout_date(self) -> date | None:
+        """Data najnowszego treningu, w którym jest co najmniej jedna seria oznaczona jako wykonana; brak -> None."""
+        with self._sf() as s:
+            return s.scalar(
+                select(func.max(Workout.workout_date))
+                .join(WorkoutExercise, WorkoutExercise.workout_id == Workout.id)
+                .join(WorkoutSet, WorkoutSet.workout_exercise_id == WorkoutExercise.id)
+                .where(WorkoutSet.done.is_(True))
+            )
+
+    def get_workout_days(self, sections) -> list[date]:
+        """Dni z treningiem, który ma co najmniej jedno ćwiczenie z jednej z `sections` (nazw sekcji); jedno zapytanie.
+
+        Ćwiczenie jest powiązane z sekcją przez Exercise.category (nazwa z tabeli Category); dzień jest liczony raz."""
+        names = list(sections)
+        if not names:
+            return []
+        with self._sf() as s:
+            stmt = (
+                select(Workout.workout_date)
+                .join(WorkoutExercise, WorkoutExercise.workout_id == Workout.id)
+                .join(Exercise, Exercise.id == WorkoutExercise.exercise_id)
+                .where(Exercise.category.in_(names))
+                .distinct()
+                .order_by(Workout.workout_date)
+            )
+            return list(s.scalars(stmt))
 
     def get_last_workout(self, today: date | None = None) -> Workout | None:
         """Najnowszy trening z datą ściśle wcześniejszą niż dziś, który ma co najmniej jedno ćwiczenie."""
@@ -1139,6 +1159,7 @@ class StatColumn(NamedTuple):
     unit: str
     pct: int | None  # zmiana procentowa; None = brak porównania („–”)
     compare: str  # napis „vs. …”
+    display: str | None = None  # gotowy napis wartości (zamiast liczby z jednostką)
 
 
 class StatCard(NamedTuple):
@@ -1191,26 +1212,196 @@ def nearest_day_index(x: float, left: float, width: float, count: int) -> int:
     return max(0, min(count - 1, int((x - left) / (width - left) * count)))
 
 
-def monthly_workout_counts(workout_dates, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
-    """Liczba dni z treningiem w każdym z ostatnich `months` miesięcy (bieżący ostatni); puste miesiące = 0."""
-    keys = [shift_month(today.year, today.month, -back) for back in range(months - 1, -1, -1)]
-    counts = dict.fromkeys(keys, 0)
-    for day in set(workout_dates):
-        key = (day.year, day.month)
-        if key in counts:
-            counts[key] += 1
-    return [(key, counts[key]) for key in keys]
-
-
-def axis_label_indices(count: int, step: int) -> list[int]:
-    """Indeksy punktów z etykietą osi: co `step`, licząc od ostatniego punktu wstecz."""
-    return [i for i in range(count) if (count - 1 - i) % step == 0]
-
-
 def fmt_stat_number(value: float) -> str:
     """Maksymalnie 2 miejsca po przecinku, bez zbędnych zer."""
     text = f"{round(value, 2):.2f}".rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
+
+
+# --- wykres liczby treningów: okno 12 okresów ---
+COUNT_WINDOW = 12
+
+
+class CountWindow(NamedTuple):
+    shift: int  # przesunięcie końca okna względem bieżącego okresu (po ograniczeniu do granic)
+    end: date  # początek ostatniego okresu okna
+    starts: list[date]  # początki wyświetlanych okresów (mniej niż 12, gdy historia jest krótsza)
+    min_shift: int
+    max_shift: int
+
+
+def periods_between(first: date, last: date, interval: str) -> int:
+    """Liczba okresów od okresu zawierającego `first` do okresu zawierającego `last`, włącznie (co najmniej 0)."""
+    a, b = period_range(first, interval)[0], period_range(last, interval)[0]
+    if interval == "week":
+        return max((b - a).days // 7 + 1, 0)
+    return max((b.year - a.year) * 12 + b.month - a.month + 1, 0)
+
+
+def period_starts(end: date, interval: str, length: int = COUNT_WINDOW) -> list[date]:
+    """Początki `length` kolejnych okresów kończących się na okresie zawierającym `end`."""
+    return [shift_period(end, interval, -back) for back in range(length - 1, -1, -1)]
+
+
+def count_window(
+    today: date, interval: str, shift: int, first_workout: date | None, last_done: date | None
+) -> CountWindow:
+    """Okno 12 okresów kończące się `shift` okresów od bieżącego; `shift` jest ograniczany do granic.
+
+    Górna granica końca okna: późniejszy z okresów - bieżący i najnowszego wykonanego treningu. Dolna: okno zaczyna się
+    najwcześniej w okresie pierwszego treningu; gdy historia jest krótsza niż okno (lub jej nie ma), nie ma cofania."""
+    current = period_range(today, interval)[0]
+    max_end = max(current, period_range(last_done, interval)[0]) if last_done else current
+    max_shift = periods_between(current, max_end, interval) - 1
+    min_shift = 0
+    if first_workout:
+        earliest_end = shift_period(first_workout, interval, COUNT_WINDOW - 1)
+        if earliest_end <= current:
+            min_shift = 1 - periods_between(earliest_end, current, interval)
+    shift = max(min_shift, min(max_shift, shift))
+    end = shift_period(current, interval, shift)
+    starts = period_starts(end, interval)
+    if first_workout:
+        oldest = period_range(first_workout, interval)[0]
+        starts = [d for d in starts if d >= oldest] or starts[-1:]
+    return CountWindow(shift, end, starts, min_shift, max_shift)
+
+
+def navigate_count_window(
+    today: date, interval: str, shift: int, delta: int, first_workout: date | None, last_done: date | None
+) -> int:
+    """Nowe przesunięcie okna po kroku `delta` (-1 starsze, 1 nowsze); poza granicami zwraca dotychczasowe."""
+    window = count_window(today, interval, shift, first_workout, last_done)
+    target = window.shift + delta
+    return target if window.min_shift <= target <= window.max_shift else window.shift
+
+
+COUNT_SWIPE_FRACTION = 0.15  # część szerokości obszaru wykresu odpowiadająca jednemu okresowi przesunięcia
+
+
+def swipe_periods(dx: float, width: float, fraction: float = COUNT_SWIPE_FRACTION) -> int:
+    """Liczba okresów (ze znakiem) dla przeciągnięcia o dx px w obszarze o szerokości width: odległość / (fraction * width)
+    w dół do całości; w lewo (dx < 0) dodatnia (nowsze dane), w prawo ujemna (starsze), poniżej progu 0."""
+    unit = fraction * width
+    if unit <= 0:
+        return 0
+    direction = interpret_swipe(dx, threshold=unit * (1 - 1e-9))  # tolerancja na błąd zmiennoprzecinkowy dokładnie na progu
+    if not direction:
+        return 0
+    return direction * int(abs(dx) / unit + 1e-9)
+
+
+def limit_swipe_periods(periods: int, shift: int, min_shift: int, max_shift: int) -> int:
+    """Ogranicza przesunięcie o `periods` tak, by `shift + wynik` leżał w [min_shift, max_shift] (stoi na granicy -> 0)."""
+    return max(min_shift - shift, min(max_shift - shift, periods))
+
+
+def count_period_label(start: date, interval: str) -> str:
+    """Etykieta okresu na osi X: „MM.RRRR” (miesiąc) lub „WW RRRR” (tydzień ISO i rok ISO)."""
+    if interval == "week":
+        iso_year, iso_week, _ = start.isocalendar()
+        return f"{iso_week:02d} {iso_year}"
+    return f"{start.month:02d}.{start.year}"
+
+
+def count_by_period(days, starts: list[date], interval: str) -> list[int]:
+    """Liczba (różnych) dni z `days` w każdym okresie zaczynającym się w `starts` (grupowanie bez zapytań)."""
+    counts = dict.fromkeys(starts, 0)
+    for day in set(days):
+        start = period_range(day, interval)[0]
+        if start in counts:
+            counts[start] += 1
+    return [counts[start] for start in starts]
+
+
+def workouts_total_and_average(days, today: date, interval: str, first_workout: date | None) -> tuple[int, float]:
+    """(treningi od pierwszego do dziś, średnia na okres od okresu pierwszego treningu do bieżącego włącznie)."""
+    if first_workout is None:
+        return 0, 0.0
+    total = len({d for d in days if first_workout <= d <= today})
+    return total, total / max(periods_between(first_workout, today, interval), 1)
+
+
+def fmt_average(value: float) -> str:
+    """Jedno miejsce po przecinku (przecinek dziesiętny), bez zbędnego zera: „3”, „2,6”, „0”."""
+    return (f"{round(value, 1):.1f}".rstrip("0").rstrip(".") or "0").replace(".", ",")
+
+
+def workouts_word(n: int) -> str:
+    """Odmiana: 1 trening, 2-4 treningi, 5 i więcej treningów (12-14: treningów)."""
+    if n == 1:
+        return "trening"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "treningi"
+    return "treningów"
+
+
+def fmt_workouts(n: int) -> str:
+    return f"{n} {workouts_word(n)}"
+
+
+class WindowComparison(NamedTuple):
+    total: int
+    previous_total: int
+    average: float
+    previous_average: float
+    total_pct: int | None
+    average_pct: int | None
+
+
+def compare_windows(days, end: date, interval: str, first_workout: date | None) -> WindowComparison:
+    """Porównanie okna 12 okresów kończącego się w `end` z 12 okresami bezpośrednio przed nim.
+
+    Średnia = treningi w oknie / 12 (okresy sprzed pierwszego treningu to 0, dzielnik stały). Poprzednie okno leżące
+    w całości przed pierwszym treningiem (lub zerowe) nie daje porównania (None)."""
+    current = count_by_period(days, period_starts(end, interval), interval)
+    previous_end = shift_period(end, interval, -COUNT_WINDOW)
+    previous = count_by_period(days, period_starts(previous_end, interval), interval)
+    total, prev_total = sum(current), sum(previous)
+    average, prev_average = total / COUNT_WINDOW, prev_total / COUNT_WINDOW
+    before_first = first_workout is None or previous_end < period_range(first_workout, interval)[0]
+    return WindowComparison(
+        total,
+        prev_total,
+        average,
+        prev_average,
+        None if before_first else percent_change(total, prev_total),
+        None if before_first else percent_change(average, prev_average),
+    )
+
+
+# --- zawężona skala osi Y wykresów ćwiczenia ---
+class AxisScale(NamedTuple):
+    lower: float
+    upper: float
+    ticks: list[float]
+
+
+AXIS_PADDING = 0.12  # zapas z góry i z dołu jako część rozpiętości danych
+AXIS_SINGLE_PADDING = 0.1  # jedna wartość lub wszystkie równe: zapas jako część wartości
+AXIS_MAX_INTERVALS = 4  # co najwyżej 5 etykiet (4 odstępy)
+
+
+def nice_axis_scale(values) -> AxisScale:
+    """Skala osi Y dopasowana do `values`: równy zapas (ok. 12% rozpiętości) z góry i z dołu, „ładny” krok
+    (1, 2, 2,5, 5 × 10^k), 4-5 etykiet, dolna granica >= 0. Jedna wartość lub równe: zapas 10% wartości;
+    same zera i brak danych: 0-1."""
+    values = list(values)
+    if not values or max(values) <= 0:
+        return AxisScale(0, 1, [0, 1])
+    low, high = min(values), max(values)
+    pad = high * AXIS_SINGLE_PADDING if high == low else (high - low) * AXIS_PADDING
+    low, high = max(0.0, low - pad), high + pad
+    raw = (high - low) / AXIS_MAX_INTERVALS
+    base = 10 ** math.floor(math.log10(raw))
+    first = last = 0
+    for step in (m * base * 10**e for e in (0, 1) for m in (1, 2, 2.5, 5)):
+        first = math.floor(round(low / step, 9))
+        last = math.ceil(round(high / step, 9))
+        if last - first <= AXIS_MAX_INTERVALS:
+            break
+    ticks = [round(i * step, 9) for i in range(first, last + 1)]
+    return AxisScale(ticks[0], ticks[-1], ticks)
 
 
 # --- pomocnicze (na pobranych, odłączonych obiektach) ---
