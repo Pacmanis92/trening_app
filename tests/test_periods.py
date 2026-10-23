@@ -14,6 +14,7 @@ from trainbeast.services import (
     generate_demo_workouts,
     navigate_period,
     percent_change,
+    period_label,
     period_range,
     period_series,
     period_stats,
@@ -54,32 +55,51 @@ def test_previous_and_next_period():
     assert shift_period(date(2026, 10, 21), "week", 1) == date(2026, 10, 26)
 
 
-# --- seria punktów ---
-def test_series_future_days_have_no_value():
-    today = date(2026, 10, 21)  # środa
-    daily = {date(2026, 10, 20): DailyStats(5, 4, 3)}
+# --- nazwa okresu ---
+def test_period_label_months_polish_nominative():
+    assert period_label(date(2026, 3, 1), "month") == "Marzec 2026"
+    assert period_label(date(2026, 10, 1), "month") == "Październik 2026"
+    assert period_label(date(2026, 12, 1), "month") == "Grudzień 2026"
+    assert period_label(date(2027, 1, 1), "month") == "Styczeń 2027"
+
+
+def test_period_label_weeks_iso():
+    assert period_label(date(2026, 3, 16), "week") == "Tydzień 12, 2026"
+    assert period_label(date(2025, 12, 29), "week") == "Tydzień 1, 2026"  # przełom roku: rok ISO następny
+    assert period_label(date(2020, 12, 28), "week") == "Tydzień 53, 2020"
+    assert period_label(date(2021, 1, 4), "week") == "Tydzień 1, 2021"
+
+
+# --- seria punktów: tylko dni z danymi ---
+def test_series_skips_days_without_sets():
+    today = date(2026, 10, 25)
+    daily = {date(2026, 10, 20): DailyStats(5, 4, 3), date(2026, 10, 22): DailyStats(1, 1, 1)}
     series = period_series(daily, today, "week", today)
-    assert [d for d, _ in series] == [date(2026, 10, 19) + timedelta(days=i) for i in range(7)]
-    assert series[0][1] == DailyStats(0, 0, 0)
-    assert series[1][1] == DailyStats(5, 4, 3)
-    assert series[2][1] == DailyStats(0, 0, 0)  # dzisiaj bez serii = 0
-    assert all(v is None for _, v in series[3:])
-    assert default_selected_index(series) == 2
+    assert series == [(date(2026, 10, 20), DailyStats(5, 4, 3)), (date(2026, 10, 22), DailyStats(1, 1, 1))]
+    assert default_selected_index(series) == 1  # ostatni dzień z danymi
 
 
-@pytest.mark.parametrize("today", [date(2026, 10, 19), date(2026, 10, 25)])
-def test_series_week_on_monday_and_sunday(today):
-    series = period_series({}, today, "week", today)
-    assert len(series) == 7
-    assert sum(v is not None for _, v in series) == today.weekday() + 1
+def test_series_future_days_skipped_and_other_periods_excluded():
+    today = date(2026, 10, 21)  # środa
+    daily = {
+        date(2026, 10, 20): DailyStats(5, 4, 3),
+        date(2026, 10, 23): DailyStats(9, 9, 9),  # przyszłość
+        date(2026, 10, 12): DailyStats(7, 7, 7),  # poprzedni tydzień
+    }
+    series = period_series(daily, today, "week", today)
+    assert [d for d, _ in series] == [date(2026, 10, 20)]
 
 
-def test_series_month_and_past_period_complete():
+def test_series_no_data_is_empty_and_nothing_selected():
     today = date(2026, 10, 21)
-    assert len(period_series({}, today, "month", today)) == 31
-    past = period_series({}, date(2026, 2, 1), "month", today)
-    assert len(past) == 28 and all(v is not None for _, v in past)
-    assert default_selected_index(past) == 27
+    assert period_series({}, today, "month", today) == []
+    assert default_selected_index([]) is None
+
+
+def test_series_single_day():
+    today = date(2026, 10, 21)
+    series = period_series({date(2026, 10, 3): DailyStats(1, 2, 3)}, today, "month", today)
+    assert len(series) == 1 and default_selected_index(series) == 0
 
 
 # --- nawigacja ---
@@ -111,7 +131,7 @@ def test_navigation_weeks_and_no_workouts():
 def test_period_stats_sum_and_max():
     today = date(2026, 10, 25)
     daily = {date(2026, 10, 19): DailyStats(100, 20, 5), date(2026, 10, 22): DailyStats(50, 30, 2)}
-    assert period_stats(period_series(daily, today, "week", today)) == (150, 30)
+    assert period_stats(period_series(daily, today, "week", today)) == (150, 30)  # dni bez treningu wnoszą 0
     assert period_stats(period_series({}, today, "week", today)) == (0, 0)  # okres bez danych
 
 

@@ -487,6 +487,11 @@ def settle_duration(progress: float, target: int, width: float, velocity: float 
     return max(0.06, min(0.3, distance * width / speed))
 
 
+def ease_out_cubic(t: float) -> float:
+    """Krzywa animacji przesuwania (dni w „Workout”, okresy w „Statystykach”): szybki start, łagodne wyhamowanie."""
+    return 1 - (1 - t) ** 3
+
+
 def day_tape_layout(progress: float, width: float, offsets: range | tuple[int, ...] = range(-3, 4)) -> list[tuple[int, float, float]]:
     """Układ taśmy dni w oknie o szerokości width: lista (offset dnia, lewa krawędź, szerokość).
 
@@ -967,11 +972,7 @@ class DailyStats(NamedTuple):
     w1: float  # łącznie podniesione / zrobione
     w2: float  # największa wartość pierwszej miary w jednej serii
     w3: float  # druga miara łącznie (powtórzenia lub minuty)
-
-
-class Record(NamedTuple):
-    value: float
-    day: date
+    w3_max: float = 0.0  # największa wartość drugiej miary w jednej serii
 
 
 class StatTitles(NamedTuple):
@@ -985,12 +986,12 @@ class StatTitles(NamedTuple):
 
 # jedna tabela napisów i jednostek: pierwsza miara -> (tytuł W1, tytuł W2, jednostka W1/W2)
 STAT_FIRST_TITLES = {
-    "weight": ("Łączny ciężar (kg)", "Największy ciężar (kg)", "kg"),
-    "distance": ("Łączny dystans (km)", "Największy dystans (km)", "km"),
+    "weight": ("Łączny ciężar (kg)", "Największy ciężar dnia (kg)", "kg"),
+    "distance": ("Łączny dystans (km)", "Najdłuższy pojedynczy dystans dnia (km)", "km"),
     "reps": ("Łączna liczba powtórzeń", "Najwięcej powtórzeń w serii", "powt."),
     "floors": ("Łączna liczba pięter", "Najwięcej pięter w serii", "pięt."),
 }
-STAT_SECOND_TITLES = {"reps": ("Powtórzenia", "powt."), "time": ("Czas (min)", "min")}
+STAT_SECOND_TITLES = {"reps": ("Powtórzenia", "powt."), "time": ("Łączny czas ćwiczeń (min)", "min")}
 
 
 def stat_titles(load_type: str, effort_type: str) -> StatTitles:
@@ -1026,10 +1027,11 @@ def aggregate_daily(load_type: str, effort_type: str, rows) -> dict[date, DailyS
         if not row.done:
             continue
         first, second = _set_values(load_type, effort_type, row)
-        acc = days.setdefault(row.day, [0.0, 0.0, 0.0])
+        acc = days.setdefault(row.day, [0.0, 0.0, 0.0, 0.0])
         acc[0] += first * second if multiply else first
         acc[1] = max(acc[1], first)
         acc[2] += second
+        acc[3] = max(acc[3], second)
     return {day: DailyStats(*acc) for day, acc in days.items()}
 
 
@@ -1062,28 +1064,40 @@ def navigate_period(start: date, interval: str, delta: int, today: date, first_w
     return target if oldest <= target <= newest else start
 
 
+def period_label(start: date, interval: str) -> str:
+    """Nazwa okresu obok tytułu wykresu: „Marzec 2026” (miesiąc) lub „Tydzień 12, 2026” (tydzień ISO i rok ISO)."""
+    if interval == "week":
+        iso_year, iso_week, _ = start.isocalendar()
+        return f"Tydzień {iso_week}, {iso_year}"
+    return f"{MONTH_NAMES[start.month - 1].capitalize()} {start.year}"
+
+
 def period_series(
     daily: dict[date, DailyStats], start: date, interval: str, today: date
-) -> list[tuple[date, DailyStats | None]]:
-    """Punkt na każdy dzień okresu; dni bez serii do dziś włącznie mają zera, dni po `today` nie mają wartości (None)."""
+) -> list[tuple[date, DailyStats]]:
+    """Dni okresu, w których była wykonana seria (do dziś włącznie), od najwcześniejszego; dni bez serii są pomijane."""
     first, last = period_range(start, interval)
-    empty = DailyStats(0.0, 0.0, 0.0)
-    result: list[tuple[date, DailyStats | None]] = []
-    for offset in range((last - first).days + 1):
-        day = first + timedelta(days=offset)
-        result.append((day, None if day > today else daily.get(day, empty)))
-    return result
+    return [(day, daily[day]) for day in sorted(daily) if first <= day <= min(last, today)]
 
 
-def default_selected_index(series: list[tuple[date, DailyStats | None]]) -> int | None:
-    """Indeks ostatniego dnia z punktem (dzisiaj w bieżącym okresie); brak punktów -> None."""
-    return next((i for i in range(len(series) - 1, -1, -1) if series[i][1] is not None), None)
+def default_selected_index(series: list[tuple[date, DailyStats]]) -> int | None:
+    """Indeks ostatniego dnia z danymi w okresie; brak danych -> None."""
+    return len(series) - 1 if series else None
 
 
-def period_stats(series: list[tuple[date, DailyStats | None]]) -> tuple[float, float]:
-    """(suma W1, maksimum W2) ze wszystkich dni okresu."""
-    values = [v for _, v in series if v is not None]
-    return sum(v.w1 for v in values), max((v.w2 for v in values), default=0.0)
+def period_stats(series: list[tuple[date, DailyStats]]) -> tuple[float, float]:
+    """(suma W1, maksimum W2) z dni okresu."""
+    return sum(v.w1 for _, v in series), max((v.w2 for _, v in series), default=0.0)
+
+
+def period_second_stats(series: list[tuple[date, DailyStats]]) -> tuple[float, float]:
+    """(suma W3, największa wartość drugiej miary w jednej serii) z dni okresu."""
+    return sum(v.w3 for _, v in series), max((v.w3_max for _, v in series), default=0.0)
+
+
+def history_max(daily: dict[date, DailyStats]) -> float:
+    """Największa wartość pierwszej miary w jednej serii z całej historii ćwiczenia (po przeliczeniu jednostek)."""
+    return max((v.w2 for v in daily.values()), default=0.0)
 
 
 def percent_change(current: float, previous: float) -> int | None:
@@ -1105,6 +1119,66 @@ def stat_total_label(load_type: str) -> str:
     return STAT_FIRST_TITLES[load_type][0].split(" (")[0]
 
 
+# etykieta lewej kolumny pola pod wykresem 2 (osobno od tytułów wykresów, które mają dopiski „dnia”)
+STAT_PEAK_LABELS = {
+    "weight": "Największy ciężar",
+    "distance": "Największy dystans",
+    "reps": "Najwięcej powtórzeń w serii",
+    "floors": "Najwięcej pięter w serii",
+}
+# druga miara -> (etykieta sumy w okresie, etykieta rekordu w serii)
+STAT_SECOND_LABELS = {
+    "reps": ("Łączna liczba powtórzeń", "Rekord powtórzeń w serii"),
+    "time": ("Łączny czas", "Rekord czasu w serii"),
+}
+
+
+class StatColumn(NamedTuple):
+    label: str
+    value: float
+    unit: str
+    pct: int | None  # zmiana procentowa; None = brak porównania („–”)
+    compare: str  # napis „vs. …”
+
+
+class StatCard(NamedTuple):
+    left: StatColumn
+    right: StatColumn
+
+
+def exercise_stat_cards(
+    load_type: str, effort_type: str, daily: dict[date, DailyStats], start: date, interval: str, today: date
+) -> tuple[StatCard, StatCard, StatCard]:
+    """Wartości trzech pól statystyk pod wykresami W1, W2 i W3 dla okresu zaczynającego się w `start`."""
+    previous = shift_period(start, interval, -1)
+    series = period_series(daily, start, interval, today)
+    prev_series = period_series(daily, previous, interval, today)
+    unit1, unit3 = STAT_FIRST_TITLES[load_type][2], STAT_SECOND_TITLES[effort_type][1]
+    month = interval == "month"
+    vs_prev = "vs. poprzedni miesiąc" if month else "vs. poprzedni tydzień"
+    vs_selected = "vs. wybrany miesiąc" if month else "vs. wybrany tydzień"
+    total, best = period_stats(series)
+    prev_total, prev_best = period_stats(prev_series)
+    total2, best2 = period_second_stats(series)
+    prev_total2, prev_best2 = period_second_stats(prev_series)
+    overall = history_max(daily)
+    total_label2, best_label2 = STAT_SECOND_LABELS[effort_type]
+    return (
+        StatCard(
+            StatColumn(stat_total_label(load_type), total, unit1, percent_change(total, prev_total), vs_prev),
+            StatColumn("Rekord serii", best, unit1, percent_change(best, prev_best), vs_prev),
+        ),
+        StatCard(
+            StatColumn(STAT_PEAK_LABELS[load_type], best, unit1, percent_change(best, prev_best), vs_prev),
+            StatColumn("Max od początku", overall, unit1, percent_change(overall, best), vs_selected),
+        ),
+        StatCard(
+            StatColumn(total_label2, total2, unit3, percent_change(total2, prev_total2), vs_prev),
+            StatColumn(best_label2, best2, unit3, percent_change(best2, prev_best2), vs_prev),
+        ),
+    )
+
+
 def period_label_step(count: int, plot_width: float, min_slot: float = 13) -> int:
     """Co który dzień pokazać etykietę osi X: 1, gdy każda mieści się w `min_slot` px, inaczej 2."""
     return 1 if count * min_slot <= plot_width else 2
@@ -1115,19 +1189,6 @@ def nearest_day_index(x: float, left: float, width: float, count: int) -> int:
     if count <= 1 or width <= left:
         return 0
     return max(0, min(count - 1, int((x - left) / (width - left) * count)))
-
-
-def stats_records(daily: dict[date, DailyStats]) -> tuple[Record | None, Record | None, Record | None]:
-    """Rekordy W1, W2, W3 z całej historii; remis -> najwcześniejsza data; same zera -> None."""
-    records: list[Record | None] = []
-    for index in range(3):
-        best: Record | None = None
-        for day in sorted(daily):
-            value = daily[day][index]
-            if value > 0 and (best is None or value > best.value):
-                best = Record(value, day)
-        records.append(best)
-    return records[0], records[1], records[2]
 
 
 def monthly_workout_counts(workout_dates, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
@@ -1150,12 +1211,6 @@ def fmt_stat_number(value: float) -> str:
     """Maksymalnie 2 miejsca po przecinku, bez zbędnych zer."""
     text = f"{round(value, 2):.2f}".rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
-
-
-def fmt_record(record: Record | None, unit: str) -> str:
-    if record is None:
-        return "Brak danych"
-    return f"Rekord: {fmt_stat_number(record.value)} {unit} ({record.day.strftime('%d.%m.%Y')})"
 
 
 # --- pomocnicze (na pobranych, odłączonych obiektach) ---
