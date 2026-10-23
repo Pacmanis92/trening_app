@@ -33,7 +33,57 @@ def make_engine(url: str | None = None) -> Engine:
     _migrate_exercise_category(engine)
     _reset_workout_tables_for_units(engine)
     Base.metadata.create_all(engine)
+    migrate_additive_columns(engine)
+    normalize_exercise_positions(engine)
     return engine
+
+
+# kolumny dodane po pierwszej wersji schematu: (tabela, kolumna, definicja SQL)
+ADDITIVE_COLUMNS = (("workout_exercise", "note", "TEXT"),)
+
+
+def migrate_additive_columns(engine: Engine) -> list[str]:
+    """Dodaje brakujące kolumny (PRAGMA table_info + ALTER TABLE ADD COLUMN); idempotentne.
+
+    Przed pierwszą zmianą robi kopię pliku bazy (.bak z datą). Zwraca nazwy dodanych kolumn."""
+    with engine.connect() as conn:
+        missing = []
+        for table, column, ddl in ADDITIVE_COLUMNS:
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            if existing and column not in existing:
+                missing.append((table, column, ddl))
+    if not missing:
+        return []
+    db_file = engine.url.database
+    if db_file and db_file != ":memory:" and Path(db_file).is_file():
+        engine.dispose()  # zamyka połączenia, żeby kopia była spójna
+        shutil.copy2(db_file, _backup_path(Path(db_file)))
+    with engine.begin() as conn:
+        for table, column, ddl in missing:
+            conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    return [f"{t}.{c}" for t, c, _ in missing]
+
+
+def normalize_exercise_positions(engine: Engine) -> int:
+    """Porządkuje `position` ćwiczeń w każdym treningu do 0..n-1 wg dotychczasowej kolejności (position, id).
+
+    Naprawia luki i duplikaty (po usunięciu ćwiczenia); ruszane są tylko wiersze o zmienionej pozycji, więc
+    kolejne uruchomienie nic nie zmienia. Zwraca liczbę zmienionych wierszy."""
+    changed = 0
+    with engine.begin() as conn:
+        if not inspect(conn).has_table("workout_exercise"):
+            return 0
+        rows = conn.exec_driver_sql(
+            "SELECT id, workout_id, position FROM workout_exercise ORDER BY workout_id, position, id"
+        ).all()
+        current_workout, index = None, 0
+        for row_id, workout_id, position in rows:
+            index = index + 1 if workout_id == current_workout else 0
+            current_workout = workout_id
+            if position != index:
+                conn.exec_driver_sql("UPDATE workout_exercise SET position = ? WHERE id = ?", (index, row_id))
+                changed += 1
+    return changed
 
 
 def _migrate_exercise_category(engine: Engine) -> None:

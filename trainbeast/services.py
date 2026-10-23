@@ -4,7 +4,7 @@ import random
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,7 @@ LOAD_TYPES = ("weight", "distance", "reps", "floors")
 EFFORT_TYPES = ("reps", "time")
 
 EMPTY_SUMMARY = "Brak wykonanych serii"
+SEED_VERSION = 1  # PRAGMA user_version po zasianiu katalogu startowego
 
 WR = ("weight", "reps")
 WT = ("weight", "time")
@@ -147,6 +148,21 @@ def exercise_display_name(en: str, pl: str) -> str:
 
 class ValidationError(ValueError):
     """Błąd danych wejściowych, z komunikatem po polsku."""
+
+
+def allowed_second_measures(first: str) -> tuple[str, ...]:
+    """Dozwolone drugie miary dla pierwszej: po „powtórzeniach” tylko czas, po pozostałych powtórzenia i czas."""
+    if first not in LOAD_TYPES:
+        raise ValidationError("Nieprawidłowy typ ćwiczenia.")
+    return ("time",) if first == "reps" else EFFORT_TYPES
+
+
+def validate_measures(first: str, second: str) -> None:
+    """Odrzuca nieznane miary i kombinację powtórzenia × powtórzenia."""
+    if first not in LOAD_TYPES or second not in EFFORT_TYPES:
+        raise ValidationError("Nieprawidłowy typ ćwiczenia.")
+    if second not in allowed_second_measures(first):
+        raise ValidationError("Powtórzenia × Powtórzenia nie są dozwolone.")
 
 
 # --- wzorce dozwolonych wartości pól liczbowych (walidacja w UI po każdej zmianie) ---
@@ -382,22 +398,42 @@ def summarize_exercise(exercise: Exercise, sets) -> list[SummaryGroup]:
     groups = []
     for units in sorted(by_units):
         done = by_units[units]
+        total_reps = f"Łączne powtórzenia: {sum(second(st) for st in done)}"
         if kind == "weight" and by_reps:
-            lines = [f"Suma przewalonego żelastwa: {_fmt_weight_total(sum(first(st) * second(st) for st in done), *units)}"]
+            lines = [
+                f"Suma przewalonego żelastwa: {_fmt_weight_total(sum(first(st) * second(st) for st in done), *units)}",
+                total_reps,
+            ]
         elif kind == "weight":
             lines = [f"Łączny czas: {fmt_time(sum(second(st) for st in done))}"]
         elif kind == "distance" and by_reps:
-            lines = [f"Łączny dystans: {_fmt_distance_total_units(sum(first(st) * second(st) for st in done), *units)}"]
+            lines = [
+                f"Łączny dystans: {_fmt_distance_total_units(sum(first(st) * second(st) for st in done), *units)}",
+                total_reps,
+            ]
         else:
             if kind == "distance":
                 lines = [f"Łączny dystans: {_fmt_distance_total_units(sum(first(st) for st in done), *units)}"]
             else:
                 lines = [f"{TOTAL_LABELS[kind]}: {sum(first(st) for st in done)}"]
-            lines.append(f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
+            lines.append(total_reps if by_reps else f"Łączny czas: {fmt_time(sum(second(st) for st in done))}")
         groups.append(SummaryGroup(" / ".join(units), lines))
     if len(groups) == 1:
         groups[0] = SummaryGroup("", groups[0].lines)
     return groups
+
+
+# --- napis „Ostatni trening” ---
+WEEKDAY_NAMES = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
+
+
+def fmt_date_dmy(day: date) -> str:
+    return f"{day.day:02d}.{day.month:02d}.{day.year:04d}"
+
+
+def fmt_last_workout(day: date, exercises: int, sets: int) -> str:
+    """„Ostatni trening: piątek, 23.10.2026, 6 ćwicz., 20 serii” (nazwy dni własne, bez locale)."""
+    return f"Ostatni trening: {WEEKDAY_NAMES[day.weekday()]}, {fmt_date_dmy(day)}, {exercises} ćwicz., {sets} serii"
 
 
 # --- kalendarz ---
@@ -554,8 +590,13 @@ class TrainingService:
         self._seed_exercises()
 
     def _seed_exercises(self) -> None:
-        """Idempotentnie: dopisuje brakujące kategorie i ćwiczenia startowe (po nazwie)."""
+        """Katalog startowy jest dopisywany tylko raz (PRAGMA user_version < SEED_VERSION), żeby usunięte
+        ćwiczenia i sekcje nie wracały przy kolejnym starcie. Dopisuje brakujące pozycje po nazwie."""
         with self._sf.begin() as s:
+            version = s.connection().exec_driver_sql("PRAGMA user_version").scalar() or 0
+            if version >= SEED_VERSION:
+                return
+            s.connection().exec_driver_sql(f"PRAGMA user_version = {SEED_VERSION}")
             known = {c.lower() for c in s.scalars(select(Category.name))}
             position = s.scalar(select(func.count(Category.id)))
             for name in STARTER_CATEGORIES:
@@ -631,10 +672,7 @@ class TrainingService:
         name = (name or "").strip()
         if not name:
             raise ValidationError("Podaj nazwę ćwiczenia.")
-        if load_type not in LOAD_TYPES or effort_type not in EFFORT_TYPES:
-            raise ValidationError("Nieprawidłowy typ ćwiczenia.")
-        if load_type == "reps" and effort_type == "reps":
-            raise ValidationError("Powtórzenia × Powtórzenia nie są dozwolone.")
+        validate_measures(load_type, effort_type)
         duplicate = ValidationError("Ćwiczenie o takiej nazwie już istnieje.")
         try:
             with self._sf.begin() as s:
@@ -838,11 +876,10 @@ class TrainingService:
             exercise = s.get(Exercise, exercise_id)
             if exercise is None:
                 raise ValidationError("Nie ma takiego ćwiczenia.")
-            position = s.scalar(
-                select(func.count(WorkoutExercise.id)).where(
-                    WorkoutExercise.workout_id == workout_id
-                )
+            last = s.scalar(
+                select(func.max(WorkoutExercise.position)).where(WorkoutExercise.workout_id == workout_id)
             )
+            position = 0 if last is None else last + 1  # nowe ćwiczenie na końcu
             we = WorkoutExercise(
                 workout_id=workout_id, exercise_id=exercise.id, position=position
             )
@@ -865,6 +902,80 @@ class TrainingService:
             we = s.get(WorkoutExercise, workout_exercise_id)
             if we is not None:
                 s.delete(we)
+
+    def reorder_workout_exercises(self, workout_id: int, old_index: int, new_index: int) -> list[int]:
+        """Przesuwa ćwiczenie z pozycji `old_index` na `new_index` i przepisuje pozycje 0..n-1.
+        Zwraca id wpisów ćwiczeń w nowej kolejności."""
+        with self._sf.begin() as s:
+            rows = list(
+                s.scalars(
+                    select(WorkoutExercise)
+                    .where(WorkoutExercise.workout_id == workout_id)
+                    .order_by(WorkoutExercise.position, WorkoutExercise.id)
+                )
+            )
+            order = move_item(rows, old_index, new_index)
+            for position, we in enumerate(order):
+                if we.position != position:
+                    we.position = position
+            return [we.id for we in order]
+
+    def get_workout_exercise_ids(self, workout_id: int) -> list[int]:
+        """Id wpisów ćwiczeń treningu w zapisanej kolejności."""
+        with self._sf() as s:
+            return list(
+                s.scalars(
+                    select(WorkoutExercise.id)
+                    .where(WorkoutExercise.workout_id == workout_id)
+                    .order_by(WorkoutExercise.position, WorkoutExercise.id)
+                )
+            )
+
+    # --- notatki do ćwiczeń w treningu ---
+    def set_exercise_note(self, workout_exercise_id: int, text: str | None) -> None:
+        """Zapisuje notatkę ćwiczenia w konkretnym treningu; pusty tekst lub same spacje = brak notatki."""
+        cleaned = (text or "").strip()
+        with self._sf.begin() as s:
+            we = s.get(WorkoutExercise, workout_exercise_id)
+            if we is not None:
+                we.note = text if cleaned else None
+
+    def get_exercise_note(self, workout_exercise_id: int) -> str:
+        """Zapisana notatka; brak = pusty tekst."""
+        with self._sf() as s:
+            we = s.get(WorkoutExercise, workout_exercise_id)
+            return (we.note or "") if we is not None else ""
+
+    # --- usuwanie z katalogu (razem z historią) ---
+    def delete_exercises(self, exercise_ids) -> None:
+        """Usuwa ćwiczenia z katalogu oraz ich historię (wpisy w treningach, serie, notatki) w jednej transakcji,
+        jawnymi usunięciami. Treningi, które przez to straciły wszystkie ćwiczenia, są usuwane; pozostałe zostają."""
+        ids = list(exercise_ids)
+        if not ids:
+            return
+        with self._sf.begin() as s:
+            entries = select(WorkoutExercise.id).where(WorkoutExercise.exercise_id.in_(ids))
+            affected = set(
+                s.scalars(select(WorkoutExercise.workout_id).where(WorkoutExercise.exercise_id.in_(ids)))
+            )
+            s.execute(delete(WorkoutSet).where(WorkoutSet.workout_exercise_id.in_(entries)))
+            s.execute(delete(WorkoutExercise).where(WorkoutExercise.exercise_id.in_(ids)))
+            s.execute(delete(Exercise).where(Exercise.id.in_(ids)))
+            if affected:
+                still_used = select(WorkoutExercise.workout_id).where(WorkoutExercise.workout_id.in_(affected))
+                s.execute(delete(Workout).where(Workout.id.in_(affected), Workout.id.not_in(still_used)))
+
+    def delete_exercise(self, exercise_id: int) -> None:
+        """Ćwiczenie z historią (zob. delete_exercises); nieistniejące -> bez błędu."""
+        self.delete_exercises([exercise_id])
+
+    def delete_category(self, name: str) -> None:
+        """Sekcję z jej ćwiczeniami i całą historią tych ćwiczeń; nieistniejąca -> bez błędu."""
+        with self._sf() as s:
+            ids = list(s.scalars(select(Exercise.id).where(Exercise.category == name)))
+        self.delete_exercises(ids)
+        with self._sf.begin() as s:
+            s.execute(delete(Category).where(Category.name == name))
 
     # --- serie ---
     @staticmethod
@@ -1402,6 +1513,86 @@ def nice_axis_scale(values) -> AxisScale:
             break
     ticks = [round(i * step, 9) for i in range(first, last + 1)]
     return AxisScale(ticks[0], ticks[-1], ticks)
+
+
+def move_item(items, old_index: int, new_index: int) -> list:
+    """Kopia listy z elementem z `old_index` przeniesionym na `new_index` (pozycja po przesunięciu)."""
+    n = len(items)
+    if not (0 <= old_index < n and 0 <= new_index < n):
+        raise ValidationError("Nieprawidłowa pozycja ćwiczenia.")
+    result = list(items)
+    result.insert(new_index, result.pop(old_index))
+    return result
+
+
+# --- stan nawigacji: zakładki i stos otwartych warstw (bez Flet) ---
+TAB_WORKOUT, TAB_STATS = "workout", "stats"
+LAYER_CALENDAR = "calendar"
+BACK_LAYER, BACK_TAB, BACK_EXIT = "layer", "tab", "exit"
+
+
+@dataclass(eq=False)
+class Layer:
+    name: str
+    on_back: Callable[[], None] | None = None
+
+
+class NavState:
+    """Zakładka, zakładka sprzed otwarcia kalendarza i stos otwartych warstw (kalendarz, okna, listy).
+
+    Warstwa rejestruje się przy otwarciu (`open_layer`) i wyrejestrowuje przy zamknięciu dowolnym sposobem
+    (`close_layer`, idempotentne). Cofnięcie (`back`) zdejmuje szczyt stosu i wywołuje jego `on_back`."""
+
+    def __init__(self) -> None:
+        self.tab = TAB_WORKOUT
+        self.layers: list[Layer] = []
+        self._calendar_return_tab: str | None = None
+
+    def switch_tab(self, tab: str) -> None:
+        self.tab = tab
+
+    def open_layer(self, name: str, on_back: Callable[[], None] | None = None) -> Layer:
+        layer = Layer(name, on_back)
+        self.layers.append(layer)
+        return layer
+
+    def close_layer(self, layer: Layer) -> bool:
+        """Wyrejestrowuje warstwę (np. po zamknięciu przyciskiem); False, gdy już jej nie ma. Zamknięcie kalendarza
+        przywraca zakładkę sprzed jego otwarcia."""
+        if layer not in self.layers:
+            return False
+        self.layers.remove(layer)
+        if layer.name == LAYER_CALENDAR:
+            self._leave_calendar()
+        return True
+
+    def open_calendar(self, on_back: Callable[[], None] | None = None) -> Layer:
+        """Otwiera kalendarz bez zmiany zakładki; zapamiętuje aktywną."""
+        self._calendar_return_tab = self.tab
+        return self.open_layer(LAYER_CALENDAR, on_back)
+
+    def _leave_calendar(self) -> None:
+        if self._calendar_return_tab is not None:
+            self.tab, self._calendar_return_tab = self._calendar_return_tab, None
+
+    def select_day_from_calendar(self, layer: Layer) -> None:
+        """Wybór dnia w kalendarzu: zamyka go i przechodzi do „Workout”."""
+        self.close_layer(layer)
+        self.tab = TAB_WORKOUT
+
+    def back(self) -> str:
+        """Systemowe cofnięcie: zamyka najwyżej otwartą warstwę (BACK_LAYER); bez warstw na „Statystykach” wraca do
+        „Workout” (BACK_TAB); bez warstw na „Workout” zwraca BACK_EXIT (zamknięcie aplikacji)."""
+        if self.layers:
+            layer = self.layers[-1]
+            self.close_layer(layer)
+            if layer.on_back is not None:
+                layer.on_back()
+            return BACK_LAYER
+        if self.tab != TAB_WORKOUT:
+            self.tab = TAB_WORKOUT
+            return BACK_TAB
+        return BACK_EXIT
 
 
 # --- pomocnicze (na pobranych, odłączonych obiektach) ---

@@ -7,7 +7,14 @@ import flet as ft
 import flet_charts as fch
 
 from .services import (
+    BACK_EXIT,
+    BACK_TAB,
     EMPTY_SUMMARY,
+    TAB_STATS,
+    TAB_WORKOUT,
+    NavState,
+    allowed_second_measures,
+    fmt_last_workout,
     MONTH_NAMES_GENITIVE,
     WEEKDAY_ABBR,
     TrainingService,
@@ -80,21 +87,25 @@ SET_LABEL_SIZE = 11  # etykieta jednostki na górnej krawędzi pola
 LABEL_OVERHANG = 8  # tyle etykieta wystaje nad ramkę pola (jej środek leży na krawędzi)
 SET_ROW_HEIGHT = SET_FIELD_HEIGHT + LABEL_OVERHANG
 NAME_ROW_HEIGHT = 60 * 0.6  # pole „Nazwa treningu" i przycisk „Kopiuj": jedna wspólna wysokość
-CAL_TEXT = "#222222"
 CAL_ROW_HEIGHT = 48
 CAL_TITLE_HEIGHT = 44
 CAL_WEEKDAY_HEIGHT = 28
 CAL_MONTH_GAP = 16  # odstęp nad nagłówkiem miesiąca
 CAL_MONTH_FIXED = CAL_TITLE_HEIGHT + CAL_WEEKDAY_HEIGHT + CAL_MONTH_GAP  # wysokość miesiąca bez wierszy dni
-CAL_SAT = ft.Colors.GREY_600
+CAL_BG = "#272a2f"  # tło całego kalendarza (to samo co karty statystyk)
+CAL_TEXT = ft.Colors.WHITE  # nagłówki miesięcy, skróty dni i numery zwykłych dni
+CAL_SAT = ft.Colors.GREY_500
 CAL_SUN = ft.Colors.RED_600
+CAL_DARK_TEXT = "#272a2f"  # numer dnia na żółtym wypełnieniu (dzisiaj)
+CAL_MARK_WIDTH = 52  # zakreślenie dnia: mieści się w komórce (ok. 53 x 48 px)
+CAL_MARK_HEIGHT = round(CAL_MARK_WIDTH * 122 / 168)  # proporcje grafiki (tools/make_calendar_marks.py)
+CAL_MARK_RING = "cal_mark_ring.png"
+CAL_MARK_FILL = "cal_mark_fill.png"
 ACCENT = "#FCB808"  # żółty ramek (odczytany ze zrzutu inspiracji)
 BLACK = "#000000"
 FILL_DARK = "#171717"  # wypełnienie paska dni, pola nazwy i kart ćwiczeń
 SCREEN_MARGIN = 8  # margines ekranu: lewy napisu TrainBeast = prawy ikony kalendarza
 HEADER_ICON_OFFSET = 30 + 4  # dawny hantel (30) + odstęp (4): zachowuje pozycję „NO EXCUSES"
-CAL_WORKOUT_BG = "#FFE9A0"
-CAL_TODAY_BG = ACCENT
 OUTLINE_BTN_RADIUS = 22
 CARD_RADIUS = 12
 DAY_TAB_HEIGHT = 32  # dwa wiersze (skrót dnia ok. 12 + data ok. 16) z minimalnym zapasem
@@ -116,6 +127,11 @@ HEADER_BTN_HEIGHT = 48  # wysokość ikony kalendarza (32 + 2 * 8); „Donate" m
 HEADER_BTN_RADIUS = 10  # zaokrąglenie ikony kalendarza i „Donate"
 HEADER_BTN_BORDER = ft.BorderSide(1, ACCENT)  # ramka ikony kalendarza i „Donate"
 TAB_BAR_HEIGHT = 48
+TAB_DIVIDER_HEIGHT = TAB_BAR_HEIGHT * 0.6  # pionowa linia między zakładkami
+TAB_DIVIDER_COLOR = ACCENT  # kontrastowa wobec ciemnego (25% żółtego na czerni) panelu zakładek
+NOTE_ICON_SIZE = 30
+NOTE_BTN_PADDING = 4
+EDIT_ROW_SPACING = 6
 TAB_SPACER = 16  # odstęp na dole przewijanych list nad paskiem zakładek
 STATS_CARD_BG = "#272a2f"
 STATS_CHART_HEIGHT = 210
@@ -142,21 +158,12 @@ INTERVAL_LABELS = {"month": "Miesięczny", "week": "Tygodniowy"}
 DONATE_WIDTH = 64  # trochę szerszy niż kalendarz (48), napis „Donate" mieści się w jednym wierszu
 
 
-def day_color(weekday: int) -> str:
-    """Kolor dnia tygodnia (0 = poniedziałek): sobota szara, niedziela czerwona."""
-    return CAL_SAT if weekday == 5 else CAL_SUN if weekday == 6 else CAL_TEXT
-
-
 def fmt_date(d: date) -> str:
     return d.strftime("%d.%m.%Y")
 
 
 def fmt_short(d: date) -> str:
     return d.strftime("%d.%m")
-
-
-def workout_title(w) -> str:
-    return w.name or "Trening"
 
 
 def outline_style(padding=None) -> ft.ButtonStyle:
@@ -546,7 +553,9 @@ class TrainBeastApp:
         self.set_groups: dict[int, list[tuple[str, list[ft.TextField]]]] = {}
         self.expanded: set[int] = set()  # karty w trybie edycji (tylko UI)
         self.snapshot: WorkoutSnapshot | None = None  # skopiowany trening (tylko w pamięci)
-        self.tab = "workout"
+        self.nav = NavState()  # zakładka, zakładka sprzed kalendarza i stos otwartych warstw (cofanie)
+        self._dialogs: list = []  # otwarte okna (do zamykania przez _pop_dialog)
+        self._calendar_layer = None
         self.stats_exercise = None  # wybrane ćwiczenie w zakładce Statystyki (tylko UI)
         self.stats_interval = "month"
         self.stats_period_start: date | None = None  # początek wyświetlanego okresu (None = bieżący); wspólny dla trzech wykresów
@@ -559,6 +568,12 @@ class TrainBeastApp:
         page.title = "TrainBeast"
         page.padding = 0
         page.bgcolor = BLACK
+        popup_theme = ft.PopupMenuTheme(  # wspólny wygląd menu kontekstowego (jak listy jednostek i interwału)
+            color=FILL_DARK,
+            shape=ft.RoundedRectangleBorder(side=ft.BorderSide(1, ACCENT), radius=CARD_RADIUS),
+        )
+        page.theme = ft.Theme(popup_menu_theme=popup_theme)
+        page.dark_theme = ft.Theme(popup_menu_theme=popup_theme)
         if page.platform in (ft.PagePlatform.WINDOWS, ft.PagePlatform.MACOS, ft.PagePlatform.LINUX):
             page.window.width = 390  # tylko podgląd na komputerze
             page.window.height = 844
@@ -578,6 +593,25 @@ class TrainBeastApp:
             )
         )
         self.render()
+        self._install_back_handler()
+
+    # --- cofanie systemowe ---
+    def _install_back_handler(self) -> None:
+        """Gest/przycisk cofania na Androidzie: widok główny nie daje się zamknąć sam (can_pop=False), a każde cofnięcie
+        trafia do on_confirm_pop, gdzie NavState zdejmuje szczyt stosu warstw. Okna (AlertDialog) i menu Flutter zamyka
+        sam Navigator, zanim cofnięcie dotrze do widoku; ich zamknięcie wyrejestrowuje on_dismiss."""
+        views = getattr(self.page, "views", None)
+        if not views:
+            return
+        views[0].can_pop = False
+        views[0].on_confirm_pop = self._on_confirm_pop
+        self.page.update()
+
+    async def _on_confirm_pop(self, e) -> None:
+        action = self.nav.back()
+        if action == BACK_TAB:
+            self._apply_tab()
+        await self.page.views[0].confirm_pop(action == BACK_EXIT)
 
     # --- infrastruktura ---
     def _show(self, header: list[ft.Control], swipe_top: list[ft.Control], panel: ft.Control, gesture: bool = True) -> None:
@@ -623,8 +657,50 @@ class TrainBeastApp:
     def _toast(self, message: str) -> None:
         self.page.show_dialog(ft.SnackBar(ft.Text(message)))
 
-    def _dialog(self, title: str, content: ft.Control | None, actions: list[ft.Control], **kwargs) -> None:
-        self.page.show_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions, **kwargs))
+    def _open_dialog(self, dialog: ft.AlertDialog, name: str, on_closed=None) -> None:
+        """Pokazuje okno i rejestruje je jako warstwę cofania. Zamknięcie dowolnym sposobem (przycisk, dotknięcie poza
+        oknem, cofanie) wyrejestrowuje warstwę i raz wywołuje `on_closed`."""
+        state = {"layer": None, "done": False}
+
+        def finish(e=None) -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            self.nav.close_layer(state["layer"])
+            if dialog in self._dialogs:
+                self._dialogs.remove(dialog)
+            if on_closed is not None:
+                on_closed()
+
+        def close() -> None:
+            finish()
+            dialog.open = False
+            dialog.update()
+
+        dialog.data = close
+        dialog.on_dismiss = finish
+        state["layer"] = self.nav.open_layer(name, on_back=close)
+        self._dialogs.append(dialog)
+        self.page.show_dialog(dialog)
+
+    def _pop_dialog(self) -> None:
+        """Zamyka najwyżej otwarte okno aplikacji."""
+        if self._dialogs:
+            self._dialogs[-1].data()
+
+    def _dialog(self, title: str, content: ft.Control | None, actions: list[ft.Control], name: str = "dialog", **kwargs) -> None:
+        self._open_dialog(ft.AlertDialog(title=ft.Text(title), content=content, actions=actions, **kwargs), name)
+
+    def _styled_dialog(self, content: ft.Control, actions: list[ft.Control]) -> ft.AlertDialog:
+        """Okno w stylu aplikacji: ciemne tło, żółte obramowanie, wyśrodkowane, wysokość z zawartości."""
+        return ft.AlertDialog(
+            content=content,
+            actions=actions,
+            bgcolor=FILL_DARK,
+            shape=ft.RoundedRectangleBorder(side=ft.BorderSide(1, ACCENT), radius=CARD_RADIUS),
+            content_padding=ft.Padding.symmetric(horizontal=16, vertical=16),
+            inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
+        )
 
     # --- zakładki ---
     def _tab_bar(self) -> ft.Control:
@@ -633,7 +709,7 @@ class TrainBeastApp:
                 title,
                 size=16,
                 color=ft.Colors.WHITE,
-                weight=ft.FontWeight.BOLD if key == self.tab else ft.FontWeight.NORMAL,
+                weight=ft.FontWeight.BOLD if key == self.nav.tab else ft.FontWeight.NORMAL,
             )
             return ft.Container(
                 label,
@@ -643,30 +719,41 @@ class TrainBeastApp:
                 on_click=lambda e, k=key: self._switch_tab(k),
             )
 
+        divider = ft.Container(width=1, height=TAB_DIVIDER_HEIGHT, bgcolor=TAB_DIVIDER_COLOR)
         return ft.Container(
-            ft.Row([tab("workout", "Workout"), tab("stats", "Statystyki")], spacing=0),
+            ft.Row(
+                [tab(TAB_WORKOUT, "Workout"), divider, tab(TAB_STATS, "Statystyki")],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             bgcolor=BTN_FILL,  # to samo wypełnienie co „Podsumowanie ćwiczenia”
             height=TAB_BAR_HEIGHT,
         )
 
     def _switch_tab(self, key: str) -> None:
         """Przełącza zakładki przez ukrywanie i pokazywanie (stan obu widoków zostaje)."""
-        if key == "stats" and not self._stats_built:
+        if self._calendar_layer is not None:  # zakładka wybrana przy otwartym kalendarzu: kalendarz się zamyka
+            self.nav.close_layer(self._calendar_layer)
+            self._calendar_layer = None
+            self.render()
+        if key == TAB_STATS and not self._stats_built:
             self._build_stats_view()
-        self.tab = key
-        self.workout_host.visible = key == "workout"
-        self.stats_host.visible = key == "stats"
-        for k, label in self._tab_labels.items():
-            label.weight = ft.FontWeight.BOLD if k == key else ft.FontWeight.NORMAL
-        if key == "stats":
+        self.nav.switch_tab(key)
+        if key == TAB_STATS:
             self.stats_period_start = None
             self.count_shift = 0
             self._refresh_stats(update=False)
-        self.page.update()
+        self._apply_tab()
 
-    def _open_calendar_from_stats(self, e=None) -> None:
-        self._switch_tab("workout")
-        self._open_calendar()
+    def _apply_tab(self) -> None:
+        """Pokazuje widok aktywnej zakładki (stan obu widoków zostaje); kalendarz leży w widoku „Workout”."""
+        key = self.nav.tab
+        show_workout = key == TAB_WORKOUT or self._calendar_layer is not None
+        self.workout_host.visible = show_workout
+        self.stats_host.visible = not show_workout
+        for k, label in self._tab_labels.items():
+            label.weight = ft.FontWeight.BOLD if k == key else ft.FontWeight.NORMAL
+        self.page.update()
 
     # --- statystyki ---
     def _build_stats_view(self) -> None:
@@ -728,7 +815,7 @@ class TrainBeastApp:
             content=ft.Column(
                 [
                     ft.Column(
-                        self._header_controls(self._open_calendar_from_stats, owner="stats"),
+                        self._header_controls(self._open_calendar, owner="stats"),
                         spacing=12,
                         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                     ),
@@ -743,7 +830,7 @@ class TrainBeastApp:
 
     def _pick_stats_exercise(self, exercise_id: int) -> None:
         self.stats_exercise = next((x for x in self.service.list_exercises() if x.id == exercise_id), None)
-        self.page.pop_dialog()
+        self._pop_dialog()
         self._refresh_stats()
 
     def _choose_interval(self, label: str) -> None:
@@ -1026,19 +1113,20 @@ class TrainBeastApp:
         screen_h = self.page.height or 800
         estimated = sum(1 if isinstance(r, ft.Container) else FILTER_ROW_HEIGHT for r in rows)
         limit = FILTER_MAX_HEIGHT * screen_h
-        self.page.show_dialog(
+        self._open_dialog(
             ft.AlertDialog(
                 content=ft.Container(
                     ft.Column(rows, scroll=ft.ScrollMode.AUTO if estimated > limit else None, spacing=0, tight=True),
                     width=min(320, (self.page.width or 390) - 80),
                     height=limit if estimated > limit else None,
                 ),
-                actions=[ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self.page.pop_dialog())],
+                actions=[ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self._pop_dialog())],
                 bgcolor=FILL_DARK,
                 shape=ft.RoundedRectangleBorder(side=ft.BorderSide(1, ACCENT), radius=CARD_RADIUS),
                 content_padding=ft.Padding.symmetric(horizontal=16, vertical=8),
                 inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
-            )
+            ),
+            "section_filter",
         )
 
     # --- główny widok ---
@@ -1104,10 +1192,7 @@ class TrainBeastApp:
         last = self.service.get_last_workout()
         if last is None:
             return "Brak zapisanych treningów"
-        return (
-            f"Ostatni trening: {fmt_date(last.workout_date)} – {workout_title(last)}, "
-            f"{len(last.exercises)} ćwicz., {done_sets_count(last)} serii"
-        )
+        return fmt_last_workout(last.workout_date, len(last.exercises), done_sets_count(last))
 
     def _refresh_info(self) -> None:
         self.info_text = self._info_texts.get("workout", self.info_text)
@@ -1216,8 +1301,12 @@ class TrainBeastApp:
 
     @staticmethod
     def _make_panel(controls: list[ft.Control]) -> ft.Container:
+        if len(controls) == 1 and isinstance(controls[0], ft.ReorderableListView):
+            content = controls[0]  # lista kart sama przewija całą zawartość dnia
+        else:
+            content = ft.Column([*controls, ft.Container(height=TAB_SPACER)], scroll=ft.ScrollMode.AUTO, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         return ft.Container(
-            ft.Column([*controls, ft.Container(height=TAB_SPACER)], scroll=ft.ScrollMode.AUTO, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+            content,
             bgcolor=BLACK,  # tło: panel zasłania sąsiada i przyjmuje dotyk w pustych miejscach
             left=0,
             right=0,
@@ -1310,6 +1399,9 @@ class TrainBeastApp:
     def _open_calendar(self, e=None) -> None:
         """Widok kalendarza: wspólny nagłówek + pionowa, leniwa lista miesięcy (bieżący miesiąc lub miesiąc wybranego dnia)."""
         today = date.today()
+        self._calendar_layer = self.nav.open_calendar(on_back=self._leave_calendar_view)
+        self.workout_host.visible = True  # z „Statystyk” kalendarz otwiera się bez zmiany aktywnej zakładki
+        self.stats_host.visible = False
         months = month_range(today)
         first = date(*months[0], 1)
         end_year, end_month = shift_month(*months[-1], 1)
@@ -1321,18 +1413,32 @@ class TrainBeastApp:
             if day is None:
                 return ft.Container(expand=1, height=CAL_ROW_HEIGHT)
             kind = classify_day(day, today, marked)
+            number = ft.Text(
+                str(day.day),
+                size=20,
+                weight=ft.FontWeight.W_500,
+                color=CAL_DARK_TEXT if kind == "today" else CAL_SUN if kind == "sunday" else CAL_SAT if day.weekday() == 5 else CAL_TEXT,
+            )
+            if kind in ("today", "workout"):  # dzisiaj: wypełnione zakreślenie, dzień z treningiem: sam obrys
+                mark = ft.Image(
+                    src=CAL_MARK_FILL if kind == "today" else CAL_MARK_RING,
+                    width=CAL_MARK_WIDTH,
+                    height=CAL_MARK_HEIGHT,
+                    fit=ft.BoxFit.FILL,
+                )
+                content = ft.Stack(
+                    [ft.Container(mark, alignment=ft.Alignment.CENTER), ft.Container(number, alignment=ft.Alignment.CENTER)],
+                    width=CAL_MARK_WIDTH,
+                    height=CAL_ROW_HEIGHT,
+                )
+            else:
+                content = number
             return ft.Container(
-                ft.Text(
-                    str(day.day),
-                    size=20,
-                    weight=ft.FontWeight.W_500,
-                    color=BLACK if kind in ("today", "workout") else CAL_SUN if kind == "sunday" else CAL_SAT if day.weekday() == 5 else ft.Colors.WHITE,
-                ),
+                content,
                 expand=1,
                 height=CAL_ROW_HEIGHT,
                 alignment=ft.Alignment.CENTER,
-                bgcolor=CAL_TODAY_BG if kind == "today" else CAL_WORKOUT_BG if kind == "workout" else None,
-                on_click=lambda e, d=day: self._select(d),
+                on_click=lambda e, d=day: self._select_from_calendar(d),
             )
 
         def month_item(i: int) -> ft.Control:
@@ -1355,12 +1461,12 @@ class TrainBeastApp:
                         ft.Row(
                             [
                                 ft.Container(
-                                    ft.Text(n, size=13, weight=ft.FontWeight.BOLD, color=day_color(k)),
+                                    ft.Text(n, size=13, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
                                     expand=1,
                                     height=CAL_WEEKDAY_HEIGHT,
                                     alignment=ft.Alignment.CENTER,
                                 )
-                                for k, n in enumerate(WEEKDAY_ABBR)
+                                for n in WEEKDAY_ABBR
                             ],
                             spacing=0,
                         ),
@@ -1381,14 +1487,34 @@ class TrainBeastApp:
             build_controls_on_demand=True,
             padding=ft.Padding.only(bottom=TAB_SPACER),
         )
-        self._show(self._header_controls(self._close_calendar), [], month_list, gesture=False)
+        calendar_body = ft.Container(month_list, expand=True, bgcolor=CAL_BG, border_radius=CARD_RADIUS)
+        self._show(self._header_controls(self._close_calendar), [], calendar_body, gesture=False)
         self.page.run_task(self._scroll_calendar, month_list, sum(heights[:target]))
 
     async def _scroll_calendar(self, month_list: ft.ListView, offset: float) -> None:
         await month_list.scroll_to(offset=offset, duration=0)
 
     def _close_calendar(self, e=None) -> None:
+        """Przycisk zamknięcia: wraca do zakładki sprzed otwarcia kalendarza."""
+        layer, self._calendar_layer = self._calendar_layer, None
+        if layer is not None:
+            self.nav.close_layer(layer)
+        self._leave_calendar_view()
+
+    def _leave_calendar_view(self) -> None:
+        """Część widokowa zamknięcia kalendarza (stos i zakładka są już zaktualizowane): przywraca widok „Workout”
+        i widok aktywnej zakładki."""
+        self._calendar_layer = None
         self.render()
+        self._apply_tab()
+
+    def _select_from_calendar(self, day: date) -> None:
+        """Wybór dnia: kalendarz się zamyka, aktywna jest zakładka „Workout” z treningiem tego dnia."""
+        layer, self._calendar_layer = self._calendar_layer, None
+        if layer is not None:
+            self.nav.select_day_from_calendar(layer)
+        self._select(day)
+        self._apply_tab()
 
     # --- zawartość wybranego dnia ---
     def _day_content(self) -> list[ft.Control]:
@@ -1435,28 +1561,44 @@ class TrainBeastApp:
             ink=True,
             on_click=self._copy_workout,
         )
-        self.cards_column = ft.Column(spacing=12)
-        for we in workout.exercises:
-            self.cards_column.controls.append(self._exercise_card(we))
+        # lista kart przeciąganych długim przytrzymaniem (domyślny mechanizm Flutter na telefonie); nagłówek i przyciski
+        # są jej header/footer, dzięki czemu cała zawartość dnia przewija się razem z listą (także podczas przeciągania)
+        header = ft.Container(
+            ft.Row([name_box, copy_button], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(bottom=12),
+        )
+        footer = ft.Column(
+            [
+                ft.Row(
+                    [
+                        big_button("Usuń trening", self._confirm_delete_workout, primary=False, expand=1, style=delete_style()),
+                        big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, expand=1, style=add_exercise_style()),
+                    ],
+                    spacing=8,
+                ),
+                ft.Container(height=TAB_SPACER),
+            ],
+            spacing=0,
+        )
+        self.cards_column = ft.ReorderableListView(
+            controls=[self._exercise_card(we) for we in workout.exercises],
+            header=header,
+            footer=footer,
+            on_reorder=self._on_reorder,
+        )
+        return [self.cards_column]
 
-        return [
-            ft.Row(
-                [
-                    name_box,
-                    copy_button,
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            self.cards_column,
-            ft.Row(
-                [
-                    big_button("Usuń trening", self._confirm_delete_workout, primary=False, expand=1, style=delete_style()),
-                    big_button("+ Dodaj ćwiczenie", self._open_add_exercise, primary=False, expand=1, style=add_exercise_style()),
-                ],
-                spacing=8,
-            ),
-        ]
+    def _on_reorder(self, e: ft.OnReorderEvent) -> None:
+        """Po upuszczeniu karty: ta sama zmiana kolejności na liście kontrolek i w bazie."""
+        cards = self.cards_column.controls
+        if e.old_index is None or e.new_index is None or not 0 <= e.old_index < len(cards):
+            return
+        cards.insert(e.new_index, cards.pop(e.old_index))
+        try:
+            self.service.reorder_workout_exercises(self.workout_id, e.old_index, e.new_index)
+        except ValidationError as err:
+            self._toast(str(err))
+        self.cards_column.update()
 
     def _add_workout(self, e=None) -> None:
         try:
@@ -1481,7 +1623,7 @@ class TrainBeastApp:
 
     def _confirm_delete_workout(self, e=None) -> None:
         def do_delete(e):
-            self.page.pop_dialog()
+            self._pop_dialog()
             self.service.delete_workout(self.workout_id)
             self.render()
 
@@ -1489,13 +1631,19 @@ class TrainBeastApp:
             "Usunąć trening?",
             ft.Text(f"Cały trening z dnia {fmt_date(self.selected)} zostanie usunięty."),
             [
-                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self._pop_dialog()),
                 ft.TextButton("Usuń", style=cancel_style(), on_click=do_delete),
             ],
         )
 
     def _exercise_card(self, we) -> ft.Container:
-        card = ft.Container(padding=12, bgcolor=FILL_DARK, border=ft.Border.all(1, ACCENT), border_radius=CARD_RADIUS)
+        card = ft.Container(
+            padding=12,
+            bgcolor=FILL_DARK,
+            border=ft.Border.all(1, ACCENT),
+            border_radius=CARD_RADIUS,
+            margin=ft.Margin.only(bottom=12),
+        )
         card.data = we.id
         self._fill_card(card, we)
         return card
@@ -1533,13 +1681,16 @@ class TrainBeastApp:
                     ft.IconButton(
                         ft.Icons.DELETE,
                         tooltip="Usuń ćwiczenie",
-                        icon_size=30,
+                        icon_size=NOTE_ICON_SIZE,
+                        style=ft.ButtonStyle(padding=NOTE_BTN_PADDING),
                         on_click=lambda e, we_id=we.id, name=we.exercise.name: self._confirm_remove_exercise(we_id, name),
                     ),
+                    self._note_button(we.id),
                     ft.Button(
                         "+ Dodaj serię",
                         height=LIST_BTN_HEIGHT,
                         expand=1,
+                        style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=12)),
                         on_click=lambda e, we_id=we.id: self._add_set(we_id),
                     ),
                     ft.FilledButton(
@@ -1550,7 +1701,7 @@ class TrainBeastApp:
                         on_click=lambda e, we=we: self._finish_exercise(we),
                     ),
                 ],
-                spacing=8,
+                spacing=EDIT_ROW_SPACING,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
@@ -1579,20 +1730,51 @@ class TrainBeastApp:
                 )
             )
         rows.append(
-            ft.Button(
-                content=ft.Row(
-                    [
-                        ft.Text("Podsumowanie ćwiczenia", color=ft.Colors.WHITE, expand=True, text_align=ft.TextAlign.CENTER),
-                        ft.Icon(ft.Icons.CHEVRON_RIGHT, color=ACCENT),
-                    ],
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                style=outline_style(),
-                height=44,
-                on_click=lambda e, we_id=we.id: self._open_summary(we_id),
+            ft.Row(
+                [
+                    self._note_button(we.id),
+                    ft.Button(
+                        content=ft.Row(
+                            [
+                                ft.Text("Podsumowanie ćwiczenia", color=ft.Colors.WHITE, expand=True, text_align=ft.TextAlign.CENTER),
+                                ft.Icon(ft.Icons.CHEVRON_RIGHT, color=ACCENT),
+                            ],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        style=outline_style(),
+                        height=44,
+                        expand=1,
+                        on_click=lambda e, we_id=we.id: self._open_summary(we_id),
+                    ),
+                ],
+                spacing=EDIT_ROW_SPACING,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
         return ft.Column(rows, spacing=6, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+
+    def _note_button(self, we_id: int) -> ft.Control:
+        """Ikona notatnika: ta sama w trybie edycji i w widoku nieedytowalnym; nie sygnalizuje, czy notatka istnieje."""
+        return ft.IconButton(
+            ft.Icons.EDIT_NOTE,
+            icon_size=NOTE_ICON_SIZE,
+            style=ft.ButtonStyle(padding=NOTE_BTN_PADDING),
+            on_click=lambda e, we_id=we_id: self._open_note(we_id),
+        )
+
+    def _open_note(self, we_id: int) -> None:
+        """Okno notatki ćwiczenia w tym treningu; zamknięcie dowolnym sposobem zapisuje notatkę."""
+        text = [self.service.get_exercise_note(we_id)]
+
+        def on_change(e) -> None:
+            text[0] = e.control.value or ""
+
+        field = ft.TextField(value=text[0], multiline=True, min_lines=3, max_lines=8, on_change=on_change)
+        dialog = self._styled_dialog(
+            ft.Container(field, width=min(360, (self.page.width or 390) - 80)),
+            [ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self._pop_dialog())],
+        )
+        self._open_dialog(dialog, "note", on_closed=lambda: self.service.set_exercise_note(we_id, text[0]))
 
     def _finish_exercise(self, we) -> None:
         for st in we.sets:  # blur może się nie wykonać: puste pola -> 0 i zapis
@@ -1616,7 +1798,8 @@ class TrainBeastApp:
                 tight=True,
                 spacing=6,
             ),
-            [ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self.page.pop_dialog())],
+            [ft.TextButton("Zamknij", style=cancel_style(), on_click=lambda e: self._pop_dialog())],
+            name="summary",
         )
 
     @staticmethod
@@ -1924,7 +2107,7 @@ class TrainBeastApp:
 
     def _confirm_remove_exercise(self, we_id: int, name: str) -> None:
         def do_remove(e):
-            self.page.pop_dialog()
+            self._pop_dialog()
             self.service.remove_exercise_from_workout(we_id)
             self.render()
 
@@ -1932,7 +2115,7 @@ class TrainBeastApp:
             "Usunąć ćwiczenie?",
             ft.Text(f"„{name}” wraz ze wszystkimi seriami zostanie usunięte z treningu."),
             [
-                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self._pop_dialog()),
                 ft.TextButton("Usuń", style=cancel_style(), on_click=do_remove),
             ],
         )
@@ -1947,7 +2130,7 @@ class TrainBeastApp:
             self._toast(str(err))
             return
         self.expanded.add(we.id)  # nowe ćwiczenie od razu w trybie edycji
-        self.page.pop_dialog()
+        self._pop_dialog()
         self.render()
 
     def _open_exercise_picker(self, on_pick, editable: bool) -> None:
@@ -1960,10 +2143,28 @@ class TrainBeastApp:
             expanded.symmetric_difference_update({name})
             refresh()
 
+        def removable(row: ft.Control, kind: str, key, label: str) -> ft.Control:
+            """Tylko przy dodawaniu ćwiczenia: długie przytrzymanie wiersza otwiera małe menu z opcją „Usuń”."""
+            if not editable:
+                return row
+            return ft.ContextMenu(
+                content=row,
+                primary_trigger=ft.ContextMenuTrigger.LONG_PRESS,
+                secondary_trigger=None,
+                tertiary_trigger=None,
+                primary_items=[ft.PopupMenuItem(content=ft.Text("Usuń", color=ft.Colors.WHITE))],
+                on_select=lambda e: self._confirm_delete_catalog(kind, key, label, on_deleted=after_delete),
+            )
+
+        def after_delete(kind: str, key) -> None:
+            if kind == "section":
+                expanded.discard(key)
+            refresh()
+
         def category_controls(name: str) -> list[ft.Control]:
             opened = name in expanded
             controls: list[ft.Control] = [
-                ft.Container(
+                removable(ft.Container(
                     ft.Row(
                         [
                             ft.Text(name, size=16, weight=ft.FontWeight.BOLD, expand=True),
@@ -1976,19 +2177,24 @@ class TrainBeastApp:
                     border=ft.Border.all(1, ft.Colors.OUTLINE),
                     border_radius=12,
                     on_click=lambda e, n=name: toggle(n),
-                )
+                ), "section", name, name)
             ]
             if opened:
                 for ex in self.service.get_exercises_by_category(name):
                     controls.append(
-                        ft.Container(
-                            ft.Text(ex.name, size=15),
-                            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-                            margin=ft.Margin.only(left=12),
-                            bgcolor=FILL_DARK,
-                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                            border_radius=8,
-                            on_click=lambda e, exid=ex.id: on_pick(exid),
+                        removable(
+                            ft.Container(
+                                ft.Text(ex.name, size=15),
+                                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                                margin=ft.Margin.only(left=12),
+                                bgcolor=FILL_DARK,
+                                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                                border_radius=8,
+                                on_click=lambda e, exid=ex.id: on_pick(exid),
+                            ),
+                            "exercise",
+                            ex.id,
+                            ex.name,
                         )
                     )
                 buttons = [ft.Button("Zwiń listę", height=LIST_BTN_HEIGHT, expand=1, style=delete_style(), on_click=lambda e, n=name: toggle(n))]
@@ -2015,10 +2221,46 @@ class TrainBeastApp:
         self._dialog(
             "Dodaj ćwiczenie",
             items,
-            [ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog())],
+            [ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self._pop_dialog())],
+            name="exercise_picker",
             inset_padding=ft.Padding.symmetric(horizontal=12, vertical=24),
             content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
         )
+
+    def _confirm_delete_catalog(self, kind: str, key, label: str, on_deleted) -> None:
+        """Okno potwierdzenia usunięcia ćwiczenia lub sekcji z katalogiem i całą historią; cofanie = „Pozostaw”."""
+        if kind == "exercise":
+            question = f"Czy na pewno chcesz usunąć ćwiczenie „{label}”? "
+            warning = "Spowoduje to usunięcie całej historii tego ćwiczenia."
+        else:
+            question = f"Czy na pewno chcesz usunąć sekcję „{label}” wraz ze wszystkimi jej ćwiczeniami? "
+            warning = "Spowoduje to usunięcie całej historii wszystkich ćwiczeń z tej sekcji."
+
+        def do_delete(e) -> None:
+            self._pop_dialog()
+            if kind == "exercise":
+                self.service.delete_exercise(key)
+                if self.stats_exercise is not None and self.stats_exercise.id == key:
+                    self.stats_exercise = None
+            else:
+                if self.stats_exercise is not None and self.stats_exercise.category == key:
+                    self.stats_exercise = None
+                self.service.delete_category(key)
+                self.count_deselected.discard(key)
+            self.expanded.clear()
+            self.render()  # aktualny dzień, napis „Ostatni trening”
+            if self._stats_built:
+                self._refresh_stats()  # wykresy, wybór ćwiczenia i filtr sekcji
+            on_deleted(kind, key)
+
+        dialog = self._styled_dialog(
+            ft.Text(spans=[ft.TextSpan(question), ft.TextSpan(warning, ft.TextStyle(weight=ft.FontWeight.BOLD))]),
+            [
+                ft.TextButton("Usuń", style=cancel_style(), on_click=do_delete),
+                ft.TextButton("Pozostaw", style=cancel_style(), on_click=lambda e: self._pop_dialog()),
+            ],
+        )
+        self._open_dialog(dialog, "confirm_delete_catalog")
 
     def _open_add_section(self, on_created) -> None:
         name = ft.TextField(label="Nazwa sekcji", height=FIELD_HEIGHT)
@@ -2030,14 +2272,14 @@ class TrainBeastApp:
                 name.error = str(err)
                 name.update()
                 return
-            self.page.pop_dialog()  # wraca do listy kategorii
+            self._pop_dialog()  # wraca do listy kategorii
             on_created()
 
         self._dialog(
             "Dodaj sekcję",
             ft.Column([name], tight=True, width=300),
             [
-                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self._pop_dialog()),
                 ft.FilledButton("Dodaj", height=BTN_HEIGHT, style=add_exercise_style(), on_click=create),
             ],
         )
@@ -2063,6 +2305,20 @@ class TrainBeastApp:
             segments=[ft.Segment("reps", label=ft.Text("Powtórzenia")), ft.Segment("time", label=ft.Text("Czas"))],
         )
 
+        def sync_effort(e=None) -> None:
+            """Po „powtórzeniach” druga miara to tylko czas (pole zablokowane); po zmianie na inną pierwszą miarę pole
+            się odblokowuje z wybranym czasem."""
+            allowed = allowed_second_measures(load.value)
+            locked = len(allowed) == 1
+            was_locked = effort.disabled
+            if locked or was_locked or effort.selected[0] not in allowed:
+                effort.selected = ["time"]
+            effort.disabled = locked
+            if e is not None:
+                effort.update()
+
+        load.on_select = sync_effort
+
         def create(e):
             try:
                 self.service.create_exercise(name.value, category, load.value, effort.selected[0])
@@ -2070,14 +2326,14 @@ class TrainBeastApp:
                 name.error = str(err)
                 name.update()
                 return
-            self.page.pop_dialog()  # wraca do listy wyboru ćwiczeń
+            self._pop_dialog()  # wraca do listy wyboru ćwiczeń
             on_created()
 
         self._dialog(
             "Własne ćwiczenie",
             ft.Column([name, load, effort], tight=True, spacing=12, width=300),
             [
-                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Anuluj", style=cancel_style(), on_click=lambda e: self._pop_dialog()),
                 ft.FilledButton("Dodaj", height=BTN_HEIGHT, style=add_exercise_style(), on_click=create),
             ],
         )

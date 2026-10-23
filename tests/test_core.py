@@ -176,14 +176,14 @@ def _lines(ex, sets):
 
 def test_summary_weight_reps_single_unit_is_one_total():
     sets = [_St(20, 10), _St(30, 10), _St(30, 10), _St(40, 10), _St(100, 10, done=False)]
-    assert _lines(_Ex("weight", "reps"), sets) == [("", ["Suma przewalonego żelastwa: 1200 kg"])]
+    assert _lines(_Ex("weight", "reps"), sets) == [("", ["Suma przewalonego żelastwa: 1200 kg", "Łączne powtórzenia: 40"])]
 
 
 def test_summary_weight_reps_kg_and_lbs_are_separate_without_conversion():
     sets = [_St(20, 10), _St(30, 10, unit="lbs"), _St(10, 5, unit="lbs"), _St(5, 1, unit="kg")]
     assert _lines(_Ex("weight", "reps"), sets) == [
-        ("kg", ["Suma przewalonego żelastwa: 205 kg"]),
-        ("lbs", ["Suma przewalonego żelastwa: 350 lbs"]),
+        ("kg", ["Suma przewalonego żelastwa: 205 kg", "Łączne powtórzenia: 11"]),
+        ("lbs", ["Suma przewalonego żelastwa: 350 lbs", "Łączne powtórzenia: 15"]),
     ]
 
 
@@ -194,7 +194,7 @@ def test_summary_weight_time():
 
 def test_summary_distance_reps():
     sets = [_St(400, 10, load="distance"), _St(400, 1, load="distance"), _St(1000, 5, load="distance")]
-    assert _lines(_Ex("distance", "reps"), sets) == [("", ["Łączny dystans: 9 km 400 m"])]
+    assert _lines(_Ex("distance", "reps"), sets) == [("", ["Łączny dystans: 9 km 400 m", "Łączne powtórzenia: 16"])]
 
 
 def test_summary_distance_time():
@@ -528,7 +528,7 @@ def test_fractional_weight_roundtrip_and_summary(svc):
     st = svc.get_workout_by_date(TODAY).exercises[0].sets[0]
     assert st.weight_kg == 2.5
     ex = svc.get_workout_by_date(TODAY).exercises[0].exercise
-    assert _lines(ex, [st]) == [("", ["Suma przewalonego żelastwa: 7.5 kg"])]
+    assert _lines(ex, [st]) == [("", ["Suma przewalonego żelastwa: 7.5 kg", "Łączne powtórzenia: 3"])]
 
 
 def test_fmt_decimal():

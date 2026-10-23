@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -45,7 +45,7 @@ class Workout(Base):
         back_populates="workout",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        order_by="WorkoutExercise.position",
+        order_by="WorkoutExercise.position, WorkoutExercise.id",
     )
 
 
@@ -58,6 +58,7 @@ class WorkoutExercise(Base):
     workout_id: Mapped[int] = mapped_column(ForeignKey("workout.id", ondelete="CASCADE"))
     exercise_id: Mapped[int] = mapped_column(ForeignKey("exercise.id"))
     position: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str | None] = mapped_column(Text, default=None)  # notatka do ćwiczenia w tym treningu
 
     workout: Mapped[Workout] = relationship(back_populates="exercises")
     exercise: Mapped[Exercise] = relationship()
