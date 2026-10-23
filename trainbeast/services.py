@@ -1,5 +1,6 @@
 import calendar
 import math
+import random
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -713,6 +714,11 @@ class TrainingService:
         rows = self.get_exercise_set_rows(exercise.id)
         return aggregate_daily(exercise.load_type, exercise.effort_type, rows)
 
+    def get_first_workout_date(self) -> date | None:
+        """Data najstarszego treningu z historii, który ma co najmniej jedno ćwiczenie; brak -> None."""
+        with self._sf() as s:
+            return s.scalar(select(func.min(Workout.workout_date)).where(Workout.exercises.any()))
+
     def get_monthly_workout_counts(self, today: date, months: int = STATS_MONTHS) -> list[tuple[tuple[int, int], int]]:
         """Liczba dni z treningiem (jak w kalendarzu) w każdym z ostatnich `months` miesięcy; jedno zapytanie."""
         first_year, first_month = shift_month(today.year, today.month, -(months - 1))
@@ -927,7 +933,6 @@ class TrainingService:
 LBS_TO_KG = 0.45359237
 MILE_TO_KM = 1.609344
 YARD_TO_M = 0.9144
-STATS_RANGE_DAYS = {"month": 30, "week": 7}
 
 
 def lbs_to_kg(value: float) -> float:
@@ -1028,14 +1033,88 @@ def aggregate_daily(load_type: str, effort_type: str, rows) -> dict[date, DailyS
     return {day: DailyStats(*acc) for day, acc in days.items()}
 
 
-def stats_series(daily: dict[date, DailyStats], today: date, days: int) -> list[tuple[date, DailyStats]]:
-    """Punkt na każdy z ostatnich `days` dni (ostatni = dzisiaj); dni bez danych mają zera."""
+# --- okresy wykresów: bieżący tydzień (pn-nd) lub miesiąc kalendarzowy ---
+def period_range(day: date, interval: str) -> tuple[date, date]:
+    """Początek i koniec (włącznie) tygodnia (pn-nd) lub miesiąca kalendarzowego zawierającego `day`."""
+    if interval == "week":
+        start = day - timedelta(days=day.weekday())
+        return start, start + timedelta(days=6)
+    return date(day.year, day.month, 1), date(day.year, day.month, calendar.monthrange(day.year, day.month)[1])
+
+
+def shift_period(day: date, interval: str, delta: int) -> date:
+    """Początek okresu przesuniętego o `delta` okresów względem okresu zawierającego `day`."""
+    start, _ = period_range(day, interval)
+    if interval == "week":
+        return start + timedelta(weeks=delta)
+    year, month = shift_month(start.year, start.month, delta)
+    return date(year, month, 1)
+
+
+def navigate_period(start: date, interval: str, delta: int, today: date, first_workout: date | None) -> date:
+    """Początek okresu po przesunięciu o `delta` (-1 poprzedni, 1 następny); poza granicami zwraca `start`.
+
+    Granice: nie dalej niż bieżący okres i nie dalej do tyłu niż okres z pierwszym treningiem (brak treningów: bez cofania)."""
+    start = period_range(start, interval)[0]
+    target = shift_period(start, interval, delta)
+    newest = period_range(today, interval)[0]
+    oldest = period_range(first_workout, interval)[0] if first_workout else newest
+    return target if oldest <= target <= newest else start
+
+
+def period_series(
+    daily: dict[date, DailyStats], start: date, interval: str, today: date
+) -> list[tuple[date, DailyStats | None]]:
+    """Punkt na każdy dzień okresu; dni bez serii do dziś włącznie mają zera, dni po `today` nie mają wartości (None)."""
+    first, last = period_range(start, interval)
     empty = DailyStats(0.0, 0.0, 0.0)
-    result = []
-    for back in range(days - 1, -1, -1):
-        day = today - timedelta(days=back)
-        result.append((day, daily.get(day, empty)))
+    result: list[tuple[date, DailyStats | None]] = []
+    for offset in range((last - first).days + 1):
+        day = first + timedelta(days=offset)
+        result.append((day, None if day > today else daily.get(day, empty)))
     return result
+
+
+def default_selected_index(series: list[tuple[date, DailyStats | None]]) -> int | None:
+    """Indeks ostatniego dnia z punktem (dzisiaj w bieżącym okresie); brak punktów -> None."""
+    return next((i for i in range(len(series) - 1, -1, -1) if series[i][1] is not None), None)
+
+
+def period_stats(series: list[tuple[date, DailyStats | None]]) -> tuple[float, float]:
+    """(suma W1, maksimum W2) ze wszystkich dni okresu."""
+    values = [v for _, v in series if v is not None]
+    return sum(v.w1 for v in values), max((v.w2 for v in values), default=0.0)
+
+
+def percent_change(current: float, previous: float) -> int | None:
+    """Zmiana procentowa względem poprzedniego okresu, zaokrąglona do pełnych procent (od zera); poprzedni <= 0 -> None."""
+    if previous <= 0:
+        return None
+    pct = (current - previous) / previous * 100
+    return int(math.copysign(math.floor(abs(pct) + 0.5), pct))
+
+
+def fmt_percent(pct: int | None) -> str:
+    return "–" if pct is None else f"{pct:+d}%" if pct else "0%"
+
+
+def stat_total_label(load_type: str) -> str:
+    """Etykieta lewej kolumny statystyk: „Łączny tonaż” dla ciężaru, inaczej nazwa W1 bez jednostki."""
+    if load_type == "weight":
+        return "Łączny tonaż"
+    return STAT_FIRST_TITLES[load_type][0].split(" (")[0]
+
+
+def period_label_step(count: int, plot_width: float, min_slot: float = 13) -> int:
+    """Co który dzień pokazać etykietę osi X: 1, gdy każda mieści się w `min_slot` px, inaczej 2."""
+    return 1 if count * min_slot <= plot_width else 2
+
+
+def nearest_day_index(x: float, left: float, width: float, count: int) -> int:
+    """Indeks dnia najbliższego dotknięciu w poziomie (x względem wykresu; `left` = szerokość osi Y)."""
+    if count <= 1 or width <= left:
+        return 0
+    return max(0, min(count - 1, int((x - left) / (width - left) * count)))
 
 
 def stats_records(daily: dict[date, DailyStats]) -> tuple[Record | None, Record | None, Record | None]:
@@ -1101,3 +1180,81 @@ def y_axis_ticks(max_value: float, integer: bool = False, target: int = 4) -> tu
     count = math.ceil(round(max_value / step, 9))
     ticks = [round(i * step, 6) for i in range(count + 1)]
     return ticks[-1], ticks
+
+
+# --- dane testowe (czysta logika, bez bazy) ---
+DEMO_EXERCISES = ("Barbell Bench Press", "Stairmaster / Stair Climber", "Cycling")
+DEMO_WEEKDAYS = (0, 2, 4)  # poniedziałek, środa, piątek
+DEMO_MONTHS = 3
+
+
+class DemoSet(NamedTuple):
+    weight_kg: float | None = None
+    distance_m: int | None = None
+    reps: int | None = None
+    duration_s: int | None = None
+    done: bool = True
+
+
+class DemoExercise(NamedTuple):
+    name: str  # nazwa angielska z katalogu; pełną nazwę w bazie tworzy exercise_display_name
+    sets: tuple[DemoSet, ...]
+
+
+class DemoWorkout(NamedTuple):
+    day: date
+    exercises: tuple[DemoExercise, ...]
+
+
+def demo_catalog_measures(name: str) -> tuple[str, str]:
+    """(pierwsza, druga miara) ćwiczenia startowego o nazwie angielskiej `name`."""
+    for items in STARTER_EXERCISES.values():
+        for en, _pl, load, effort in items:
+            if en == name:
+                return load, effort
+    raise KeyError(name)
+
+
+def demo_start_date(today: date) -> date:
+    year, month = shift_month(today.year, today.month, -DEMO_MONTHS)
+    return date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
+
+
+def generate_demo_workouts(today: date, seed: int = 42) -> list[DemoWorkout]:
+    """Treningi pn/śr/pt z ostatnich 3 miesięcy do `today` włącznie; każdy z trzema ćwiczeniami demo.
+
+    Wartości w jednostkach bazowych (kg, m, s), z lekkim wzrostem w czasie i losowością o stałym ziarnie."""
+    rng = random.Random(seed)
+    start = demo_start_date(today)
+    days = [start + timedelta(days=i) for i in range((today - start).days + 1)]
+    days = [d for d in days if d.weekday() in DEMO_WEEKDAYS]
+    workouts = []
+    for index, day in enumerate(days):
+        progress = index / max(len(days) - 1, 1)  # 0..1: lekki wzrost w czasie
+        bench = tuple(
+            DemoSet(
+                weight_kg=min(80.0, max(60.0, round((60 + 15 * progress + rng.uniform(-3, 3)) / 2.5) * 2.5)),
+                reps=rng.randint(6, 10),
+            )
+            for _ in range(rng.randint(3, 4))
+        )
+        stairs = tuple(
+            DemoSet(reps=int(minutes * rng.uniform(3.5, 4.5)), duration_s=minutes * 60)
+            for minutes in (rng.randint(10 + round(5 * progress), 15 + round(10 * progress)) for _ in range(rng.randint(1, 2)))
+        )
+        cycling = []
+        for _ in range(rng.randint(1, 2)):
+            km = round(10 + 10 * progress + rng.uniform(0, 5), 1)
+            speed = rng.uniform(22, 28) + 2 * progress  # km/h
+            cycling.append(DemoSet(distance_m=int(km * 1000), duration_s=int(km / speed * 3600)))
+        workouts.append(
+            DemoWorkout(
+                day,
+                (
+                    DemoExercise(DEMO_EXERCISES[0], bench),
+                    DemoExercise(DEMO_EXERCISES[1], stairs),
+                    DemoExercise(DEMO_EXERCISES[2], tuple(cycling)),
+                ),
+            )
+        )
+    return workouts

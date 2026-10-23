@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 from datetime import date, timedelta
 
@@ -7,7 +8,6 @@ import flet_charts as fch
 
 from .services import (
     EMPTY_SUMMARY,
-    STATS_RANGE_DAYS,
     MONTH_NAMES_GENITIVE,
     WEEKDAY_ABBR,
     TrainingService,
@@ -16,6 +16,18 @@ from .services import (
     WorkoutSnapshot,
     allowed_units,
     axis_label_indices,
+    default_selected_index,
+    fmt_percent,
+    nearest_day_index,
+    navigate_period,
+    percent_change,
+    period_label_step,
+    period_range,
+    period_series,
+    period_stats,
+    shift_period,
+    stat_total_label,
+    interpret_swipe,
     done_sets_count,
     has_snapshot_to_paste,
     fmt_decimal,
@@ -43,7 +55,6 @@ from .services import (
     shift_month,
     stat_titles,
     stats_records,
-    stats_series,
     summarize_exercise,
     weekday_abbr,
     y_axis_ticks,
@@ -100,6 +111,17 @@ STATS_CARD_BG = "#272a2f"
 STATS_CHART_HEIGHT = 210
 STATS_CHART_LABEL_SIZE = 10
 STATS_LEFT_AXIS_WIDTH = 44
+CHART_GRID_COLOR = "#30343a"  # tylko odrobinę jaśniejszy niż STATS_CARD_BG
+CHART_TOOLTIP_ROOM = 36  # miejsce nad wykresem na dymek najwyższego punktu
+SELECTED_DOT_RADIUS = 6
+STATS_DIVIDER_HEIGHT = 78  # pionowa linia między kolumnami statystyk
+CHART_TOOLTIP_BG = "#1b1d20"
+CHART_TOOLTIP_BORDER = "#d9d9d9"
+CHART_BOTTOM_AXIS = 44  # miejsce pod osią na pionowe etykiety DD.MM
+CHART_LABEL_BOX = (14, 36)  # (szerokość, wysokość) pola obróconej etykiety
+UP_COLOR = ft.Colors.GREEN_400
+DOWN_COLOR = ft.Colors.RED_400
+PERIOD_ANIM_MS = 130  # wyjazd i wjazd wykresów po zmianie okresu (łącznie ok. 290 ms)
 INTERVAL_WIDTH = 124
 INTERVAL_LABELS = {"month": "Miesięczny", "week": "Tygodniowy"}
 DONATE_WIDTH = 64  # trochę szerszy niż kalendarz (48), napis „Donate" mieści się w jednym wierszu
@@ -179,6 +201,190 @@ def own_button(text: str, on_click, **kwargs) -> ft.FilledButton:
     return ft.FilledButton(text, height=BTN_HEIGHT - 8, style=add_exercise_style(), on_click=on_click, **kwargs)
 
 
+def fmt_chart_date(d: date) -> str:
+    return f"{d.day:02d}.{d.month:02d}.{d.year}"
+
+
+def vertical_label(text: str) -> ft.Control:
+    """Etykieta osi X obrócona o 90 stopni (Text.rotate nie zmienia rozmiaru, więc leży w Stacku o stałym polu)."""
+    w, h = CHART_LABEL_BOX
+    return ft.Container(
+        ft.Stack(
+            [
+                ft.Container(
+                    ft.Text(text, size=STATS_CHART_LABEL_SIZE, color=ft.Colors.WHITE, no_wrap=True, text_align=ft.TextAlign.CENTER),
+                    width=h,
+                    height=w,
+                    alignment=ft.Alignment.CENTER,
+                    left=(w - h) / 2,
+                    top=(h - w) / 2,
+                    rotate=ft.Rotate(math.pi / 2),
+                )
+            ],
+            clip_behavior=ft.ClipBehavior.NONE,
+        ),
+        width=w,
+        height=h,
+    )
+
+
+class PeriodChart:
+    """Wspólny wykres okresu (punkt = dzień) z zaznaczanym punktem; używany dla W1, W2 i W3 (różnią się tytułem, danymi, jednostką).
+
+    Zaznaczenie (powiększona kropka, przerywana linia w dół, dymek) jest nakładką w Stacku nad LineChart, bo wbudowane
+    `selected` przy `interactive=False` psuło w Flet 1.0.4 rysowanie kolejnych kart."""
+
+    def __init__(self, title: str, unit: str, series, index: int, footer: ft.Control | None, page_width: float):
+        self.title, self.unit, self.series = title, unit, series
+        self.values = [None if v is None else v[index] for _, v in series]
+        self.selected = default_selected_index(series)
+        self.width = max(page_width - 2 * SCREEN_MARGIN - 24 - 12, 100.0)  # karta (padding 12) i prawy odstęp 12; poprawiane on_size_change
+        self.chart_host = ft.Container(padding=ft.Padding.only(right=12))
+        self.control = ft.Container(
+            ft.Column(
+                [
+                    ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+                    ft.GestureDetector(self.chart_host, on_tap_down=self._on_tap),
+                    *([footer] if footer is not None else []),
+                ],
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=12,
+            bgcolor=STATS_CARD_BG,
+            border_radius=CARD_RADIUS,
+        )
+        self.chart_host.on_size_change = self._on_size
+        self._build()
+
+    def _on_size(self, e) -> None:
+        width = e.width - 12
+        if abs(width - self.width) > 1:
+            self.width = width
+            self._build()
+            self.chart_host.update()
+
+    def _on_tap(self, e: ft.TapEvent) -> None:
+        points = [i for i, v in enumerate(self.values) if v is not None]
+        if not points:
+            return
+        guess = nearest_day_index(e.local_position.x, STATS_LEFT_AXIS_WIDTH, self.width, len(self.values))
+        chosen = min(points, key=lambda i: abs(i - guess))
+        if chosen != self.selected:
+            self.selected = chosen
+            self._build()
+            self.chart_host.update()
+
+    def _overlay(self, top: float) -> list[ft.Control]:
+        """Kropka, przerywana linia pionowa do osi X i dymek zaznaczonego dnia (współrzędne z geometrii wykresu)."""
+        i = self.selected
+        if i is None or self.values[i] is None:
+            return []
+        plot_w = self.width - STATS_LEFT_AXIS_WIDTH
+        plot_h = STATS_CHART_HEIGHT - CHART_BOTTOM_AXIS
+        x = STATS_LEFT_AXIS_WIDTH + (i + 0.5) / len(self.values) * plot_w
+        y = CHART_TOOLTIP_ROOM + plot_h * (1 - self.values[i] / top)
+        dash, gap = 3, 3
+        length = CHART_TOOLTIP_ROOM + plot_h - y  # od punktu do osi X
+        dashes = max(math.ceil(length / (dash + gap)), 1)
+        line = ft.Column(
+            [
+                ft.Container(width=1.5, height=min(dash, length - n * (dash + gap)), bgcolor=ACCENT)  # ostatnia kreska kończy się na osi
+                for n in range(dashes)
+            ],
+            spacing=gap,
+            left=x - 0.75,
+            top=y,
+        )
+        dot = ft.Container(
+            width=2 * SELECTED_DOT_RADIUS,
+            height=2 * SELECTED_DOT_RADIUS,
+            border_radius=SELECTED_DOT_RADIUS,
+            bgcolor=ACCENT,
+            border=ft.Border.all(2, ft.Colors.WHITE),
+            left=x - SELECTED_DOT_RADIUS,
+            top=y - SELECTED_DOT_RADIUS,
+        )
+        value_text = f"{fmt_stat_number(self.values[i])} {self.unit}"
+        tip_w = max(96.0, 22 + 8.5 * len(value_text))
+        tip_h = 46.0
+        tip = ft.Container(
+            ft.Column(
+                [
+                    ft.Text(fmt_chart_date(self.series[i][0]), size=12, color=ft.Colors.WHITE),
+                    ft.Text(value_text, size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE, max_lines=1),
+                ],
+                spacing=2,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            width=tip_w,
+            height=tip_h,
+            padding=ft.Padding.symmetric(horizontal=10),
+            bgcolor=CHART_TOOLTIP_BG,
+            border=ft.Border.all(1, CHART_TOOLTIP_BORDER),
+            border_radius=8,
+            left=min(max(x - tip_w / 2, 0), max(self.width - tip_w, 0)),  # nie wychodzi poza kartę
+            top=max(y - SELECTED_DOT_RADIUS - 4 - tip_h, 0),
+        )
+        return [line, dot, tip]
+
+    def _build(self) -> None:
+        count = len(self.values)
+        shown = [v for v in self.values if v is not None]
+        top, ticks = y_axis_ticks(max(shown, default=0))
+        step = period_label_step(count, self.width - STATS_LEFT_AXIS_WIDTH)
+        points = [
+            fch.LineChartDataPoint(i, v, point=fch.ChartCirclePoint(color=ACCENT, radius=3), show_tooltip=False)
+            for i, v in enumerate(self.values)
+            if v is not None
+        ]
+        grid_step = ticks[1] - ticks[0] if len(ticks) > 1 else 1
+        chart = fch.LineChart(
+            data_series=[fch.LineChartData(points=points, color=ACCENT, stroke_width=2, curved=False)] if points else [],
+            min_x=-0.5,
+            max_x=count - 0.5,
+            min_y=0,
+            max_y=top,
+            interactive=False,
+            animation=None,
+            tooltip=None,
+            horizontal_grid_lines=fch.ChartGridLines(interval=grid_step, color=CHART_GRID_COLOR, width=1, dash_pattern=[4, 4]),
+            left_axis=fch.ChartAxis(
+                labels=[
+                    fch.ChartAxisLabel(
+                        value=t,
+                        label=ft.Text(fmt_stat_number(t), size=STATS_CHART_LABEL_SIZE, color=ft.Colors.WHITE, max_lines=1),
+                    )
+                    for t in ticks
+                ],
+                label_size=STATS_LEFT_AXIS_WIDTH,
+                label_spacing=grid_step,
+                show_min=True,
+                show_max=True,
+            ),
+            bottom_axis=fch.ChartAxis(
+                labels=[
+                    fch.ChartAxisLabel(value=i, label=vertical_label(f"{self.series[i][0].day:02d}.{self.series[i][0].month:02d}"))
+                    for i in range(0, count, step)
+                ],
+                label_size=CHART_BOTTOM_AXIS,
+                label_spacing=step,
+                show_min=False,
+                show_max=False,
+            ),
+            top_axis=fch.ChartAxis(show_labels=False),
+            right_axis=fch.ChartAxis(show_labels=False),
+            height=STATS_CHART_HEIGHT,
+            top=CHART_TOOLTIP_ROOM,
+            left=0,
+            right=0,
+        )
+        self.chart_host.content = ft.Stack(
+            [chart, *self._overlay(top)],
+            height=CHART_TOOLTIP_ROOM + STATS_CHART_HEIGHT,
+        )
+
+
 class TrainBeastApp:
     def __init__(self, page: ft.Page, service: TrainingService):
         self.page = page
@@ -192,6 +398,9 @@ class TrainBeastApp:
         self.tab = "workout"
         self.stats_exercise = None  # wybrane ćwiczenie w zakładce Statystyki (tylko UI)
         self.stats_interval = "month"
+        self.stats_period_start: date | None = None  # początek wyświetlanego okresu (None = bieżący); wspólny dla trzech wykresów
+        self._period_busy = False  # trwa animacja zmiany okresu: kolejne gesty ignorowane
+        self._period_drag: list[float] = []  # [x startu, ostatni x] poziomego przeciągnięcia
         self._info_texts: dict[str, ft.Text] = {}
         self._reset_swipe()
 
@@ -298,6 +507,7 @@ class TrainBeastApp:
         for k, label in self._tab_labels.items():
             label.weight = ft.FontWeight.BOLD if k == key else ft.FontWeight.NORMAL
         if key == "stats":
+            self.stats_period_start = None
             self._refresh_stats(update=False)
         self.page.update()
 
@@ -350,6 +560,7 @@ class TrainBeastApp:
             border=ft.Border.all(1, ACCENT),
             border_radius=CARD_RADIUS,
         )
+        self.period_slider = ft.Container(offset=ft.Offset(0, 0), opacity=1)
         self.stats_charts = ft.Column(
             scroll=ft.ScrollMode.AUTO,
             expand=True,
@@ -382,6 +593,7 @@ class TrainBeastApp:
 
     def _choose_interval(self, label: str) -> None:
         self.stats_interval = next(k for k, v in INTERVAL_LABELS.items() if v == label)
+        self.stats_period_start = None  # zmiana interwału wraca do bieżącego tygodnia / miesiąca
         self._refresh_stats()
 
     def _refresh_stats(self, update: bool = True) -> None:
@@ -394,22 +606,18 @@ class TrainBeastApp:
         self.stats_interval_text.value = INTERVAL_LABELS[self.stats_interval]
         cards: list[ft.Control] = []
         if exercise is not None:
-            daily = self.service.get_exercise_daily_stats(exercise)
-            series = stats_series(daily, today, STATS_RANGE_DAYS[self.stats_interval])
-            labels = [fmt_short(day) for day, _ in series]
-            step = 1 if len(series) <= 7 else 5
-            titles = stat_titles(exercise.load_type, exercise.effort_type)
-            records = stats_records(daily)
-            for index, (title, unit) in enumerate(zip(titles[:3], titles[3:])):
-                cards.append(
-                    self._chart_card(
-                        title,
-                        [(i, values[index]) for i, (day, values) in enumerate(series) if day in daily],  # tylko dni z treningiem
-                        labels,
-                        step,
-                        fmt_record(records[index], unit),
-                    )
+            if self.stats_period_start is None:
+                self.stats_period_start = period_range(today, self.stats_interval)[0]
+            self.period_slider.content = self._period_column(exercise, today)
+            cards.append(
+                ft.GestureDetector(
+                    self.period_slider,
+                    drag_interval=10,
+                    on_horizontal_drag_start=self._on_period_drag_start,
+                    on_horizontal_drag_update=self._on_period_drag_update,
+                    on_horizontal_drag_end=self._on_period_drag_end,
                 )
+            )
         counts = self.service.get_monthly_workout_counts(today)
         cards.append(
             self._chart_card(
@@ -425,6 +633,108 @@ class TrainBeastApp:
         self.stats_charts.controls = cards
         if update:
             self.page.update()
+
+    def _period_column(self, exercise, today: date) -> ft.Control:
+        """Trzy wykresy wybranego okresu (W1 ze statystykami, W2 i W3 z rekordem z całej historii)."""
+        interval, start = self.stats_interval, self.stats_period_start
+        daily = self.service.get_exercise_daily_stats(exercise)
+        series = period_series(daily, start, interval, today)
+        titles = stat_titles(exercise.load_type, exercise.effort_type)
+        records = stats_records(daily)
+        total, best = period_stats(series)
+        prev_total, prev_best = period_stats(period_series(daily, shift_period(start, interval, -1), interval, today))
+        page_width = self.page.width or 390
+        charts = []
+        for index, (title, unit) in enumerate(zip(titles[:3], titles[3:])):
+            if index == 0:
+                footer = self._period_stats_card(
+                    exercise.load_type,
+                    unit,
+                    (total, percent_change(total, prev_total)),
+                    (best, percent_change(best, prev_best)),
+                )
+            else:
+                footer = ft.Text(fmt_record(records[index], unit), size=14, color=ft.Colors.WHITE)
+            charts.append(PeriodChart(title, unit, series, index, footer, page_width).control)
+        return ft.Column(charts, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+
+    def _period_stats_card(self, load_type: str, unit: str, left, right) -> ft.Control:
+        """Dwie kolumny pod wykresem 1: suma W1 i rekord serii (W2) ze zmianą procentową względem poprzedniego okresu."""
+        compare = "vs. poprzedni miesiąc" if self.stats_interval == "month" else "vs. poprzedni tydzień"
+
+        def column(icon, label: str, value: float, pct: int | None) -> ft.Control:
+            change: list[ft.Control] = []
+            if pct:
+                change.append(ft.Icon(ft.Icons.ARROW_UPWARD if pct > 0 else ft.Icons.ARROW_DOWNWARD, size=14, color=UP_COLOR if pct > 0 else DOWN_COLOR))
+            color = UP_COLOR if pct and pct > 0 else DOWN_COLOR if pct else ft.Colors.WHITE
+            change.append(ft.Text(fmt_percent(pct), size=12, color=color))
+            return ft.Column(
+                [
+                    ft.Row([ft.Icon(icon, size=18, color=ACCENT), ft.Text(label, size=12, color=ft.Colors.WHITE, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True)], spacing=6),
+                    ft.Text(f"{fmt_stat_number(value)} {unit}", size=20, weight=ft.FontWeight.BOLD, color=ACCENT, max_lines=1),
+                    ft.Row(change, spacing=2),
+                    ft.Text(compare, size=10, color=ft.Colors.WHITE),
+                ],
+                spacing=2,
+                expand=True,
+            )
+
+        return ft.Container(
+            ft.Row(
+                [
+                    column(ft.Icons.FITNESS_CENTER, stat_total_label(load_type), *left),
+                    ft.Container(width=1, height=STATS_DIVIDER_HEIGHT, bgcolor=CHART_GRID_COLOR),
+                    column(ft.Icons.EMOJI_EVENTS, "Rekord serii", *right),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            padding=ft.Padding.only(top=8),
+            border=ft.Border.only(top=ft.BorderSide(1, CHART_GRID_COLOR)),
+        )
+
+    def _on_period_drag_start(self, e: ft.DragStartEvent) -> None:
+        self._period_drag = [e.global_position.x, e.global_position.x]
+
+    def _on_period_drag_update(self, e: ft.DragUpdateEvent) -> None:
+        if self._period_drag:
+            self._period_drag[1] = e.global_position.x
+
+    async def _on_period_drag_end(self, e: ft.DragEndEvent) -> None:
+        drag, self._period_drag = self._period_drag, []
+        if not drag or self._period_busy:
+            return
+        direction = interpret_swipe(drag[1] - drag[0])  # w prawo -> -1 (poprzedni okres), w lewo -> 1 (następny)
+        if direction:
+            await self._change_period(direction)
+
+    async def _change_period(self, delta: int) -> None:
+        """Przesuwa okres o `delta`; stary widok wyjeżdża z zanikaniem, nowy wjeżdża z przeciwnej strony."""
+        today = date.today()
+        new = navigate_period(self.stats_period_start, self.stats_interval, delta, today, self.service.get_first_workout_date())
+        if new == self.stats_period_start or self.stats_exercise is None:
+            return  # granica: nic się nie dzieje
+        self._period_busy = True
+        slider = self.period_slider
+        try:
+            slider.animate_offset = slider.animate_opacity = ft.Animation(PERIOD_ANIM_MS, ft.AnimationCurve.EASE_IN)
+            slider.offset, slider.opacity = ft.Offset(-delta, 0), 0
+            slider.update()
+            await asyncio.sleep(PERIOD_ANIM_MS / 1000)
+            self.stats_period_start = new
+            slider.animate_offset = slider.animate_opacity = None  # skok na stronę wjazdu bez animacji
+            slider.offset, slider.opacity = ft.Offset(delta, 0), 0
+            slider.content = self._period_column(self.stats_exercise, today)
+            slider.update()
+            await asyncio.sleep(0.03)
+            slider.animate_offset = slider.animate_opacity = ft.Animation(PERIOD_ANIM_MS, ft.AnimationCurve.EASE_OUT)
+            slider.offset, slider.opacity = ft.Offset(0, 0), 1
+            slider.update()
+            await asyncio.sleep(PERIOD_ANIM_MS / 1000)
+        finally:
+            slider.animate_offset = slider.animate_opacity = None
+            slider.offset, slider.opacity = ft.Offset(0, 0), 1
+            self._period_busy = False
 
     @staticmethod
     def _chart_card(title: str, points: list[tuple[int, float]], labels: list[str], step: int, record: str | None, integer: bool = False) -> ft.Control:

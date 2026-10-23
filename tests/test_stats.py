@@ -15,7 +15,6 @@ from trainbeast.services import (
     monthly_workout_counts,
     stat_titles,
     stats_records,
-    stats_series,
 )
 
 D1 = date(2026, 10, 1)
@@ -70,16 +69,6 @@ def test_floors_reps_not_squared():
 def test_reps_time():
     daily = aggregate_daily("reps", "time", [row(reps=10, dur=60), row(reps=20, dur=120)])
     assert daily[D1] == DailyStats(30, 20, 3)
-
-
-@pytest.mark.parametrize("days", [30, 7])
-def test_series_range(days):
-    today = date(2026, 10, 22)
-    series = stats_series({today: DailyStats(1, 2, 3)}, today, days)
-    assert len(series) == days
-    assert series[-1] == (today, DailyStats(1, 2, 3))
-    assert series[0][0] == today - timedelta(days=days - 1)
-    assert all(v == DailyStats(0, 0, 0) for _, v in series[:-1])
 
 
 def test_records_whole_history_tie_and_empty():
