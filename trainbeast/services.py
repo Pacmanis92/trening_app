@@ -1184,17 +1184,6 @@ def shift_period(day: date, interval: str, delta: int) -> date:
     return date(year, month, 1)
 
 
-def navigate_period(start: date, interval: str, delta: int, today: date, first_workout: date | None) -> date:
-    """Początek okresu po przesunięciu o `delta` (-1 poprzedni, 1 następny); poza granicami zwraca `start`.
-
-    Granice: nie dalej niż bieżący okres i nie dalej do tyłu niż okres z pierwszym treningiem (brak treningów: bez cofania)."""
-    start = period_range(start, interval)[0]
-    target = shift_period(start, interval, delta)
-    newest = period_range(today, interval)[0]
-    oldest = period_range(first_workout, interval)[0] if first_workout else newest
-    return target if oldest <= target <= newest else start
-
-
 def period_label(start: date, interval: str) -> str:
     """Nazwa okresu obok tytułu wykresu: „Marzec 2026” (miesiąc) lub „Tydzień 12, 2026” (tydzień ISO i rok ISO)."""
     if interval == "week":
@@ -1211,9 +1200,10 @@ def period_series(
     return [(day, daily[day]) for day in sorted(daily) if first <= day <= min(last, today)]
 
 
-def default_selected_index(series: list[tuple[date, DailyStats]]) -> int | None:
-    """Indeks ostatniego dnia z danymi w okresie; brak danych -> None."""
-    return len(series) - 1 if series else None
+def last_point_in_window(xs, first: int, visible: int) -> int | None:
+    """Indeks (na liście `xs` pozycji punktów na osi X) ostatniego punktu w oknie [first, first + visible); brak -> None."""
+    inside = [n for n, x in enumerate(xs) if first <= x < first + visible]
+    return inside[-1] if inside else None
 
 
 def period_stats(series: list[tuple[date, DailyStats]]) -> tuple[float, float]:
@@ -1271,6 +1261,7 @@ class StatColumn(NamedTuple):
     pct: int | None  # zmiana procentowa; None = brak porównania („–”)
     compare: str  # napis „vs. …”
     display: str | None = None  # gotowy napis wartości (zamiast liczby z jednostką)
+    sublabel: str | None = None  # nazwa okresu pod etykietą („Październik 2026”); None = bez podpisu
 
 
 class StatCard(NamedTuple):
@@ -1283,6 +1274,7 @@ def exercise_stat_cards(
 ) -> tuple[StatCard, StatCard, StatCard]:
     """Wartości trzech pól statystyk pod wykresami W1, W2 i W3 dla okresu zaczynającego się w `start`."""
     previous = shift_period(start, interval, -1)
+    name = period_label(start, interval)
     series = period_series(daily, start, interval, today)
     prev_series = period_series(daily, previous, interval, today)
     unit1, unit3 = STAT_FIRST_TITLES[load_type][2], STAT_SECOND_TITLES[effort_type][1]
@@ -1297,16 +1289,16 @@ def exercise_stat_cards(
     total_label2, best_label2 = STAT_SECOND_LABELS[effort_type]
     return (
         StatCard(
-            StatColumn(stat_total_label(load_type), total, unit1, percent_change(total, prev_total), vs_prev),
-            StatColumn("Rekord serii", best, unit1, percent_change(best, prev_best), vs_prev),
+            StatColumn(stat_total_label(load_type), total, unit1, percent_change(total, prev_total), vs_prev, sublabel=name),
+            StatColumn("Rekord serii", best, unit1, percent_change(best, prev_best), vs_prev, sublabel=name),
         ),
         StatCard(
-            StatColumn(STAT_PEAK_LABELS[load_type], best, unit1, percent_change(best, prev_best), vs_prev),
+            StatColumn(STAT_PEAK_LABELS[load_type], best, unit1, percent_change(best, prev_best), vs_prev, sublabel=name),
             StatColumn("Max od początku", overall, unit1, percent_change(overall, best), vs_selected),
         ),
         StatCard(
-            StatColumn(total_label2, total2, unit3, percent_change(total2, prev_total2), vs_prev),
-            StatColumn(best_label2, best2, unit3, percent_change(best2, prev_best2), vs_prev),
+            StatColumn(total_label2, total2, unit3, percent_change(total2, prev_total2), vs_prev, sublabel=name),
+            StatColumn(best_label2, best2, unit3, percent_change(best2, prev_best2), vs_prev, sublabel=name),
         ),
     )
 
@@ -1329,16 +1321,15 @@ def fmt_stat_number(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
-# --- wykres liczby treningów: okno 12 okresów ---
+# --- wykres liczby treningów: jedna taśma okresów, widoczne okno 12 okresów ---
 COUNT_WINDOW = 12
+COUNT_SWIPE_FRACTION = 0.15  # część szerokości obszaru wykresu, której przeciągnięcie przesuwa taśmę o jeden slot
 
 
-class CountWindow(NamedTuple):
-    shift: int  # przesunięcie końca okna względem bieżącego okresu (po ograniczeniu do granic)
-    end: date  # początek ostatniego okresu okna
-    starts: list[date]  # początki wyświetlanych okresów (mniej niż 12, gdy historia jest krótsza)
-    min_shift: int
-    max_shift: int
+class CountTape(NamedTuple):
+    starts: list[date]  # początki wszystkich okresów taśmy: od okresu pierwszego treningu do górnej granicy
+    visible: int  # liczba okresów widocznych naraz: min(12, długość taśmy)
+    first: int  # indeks pierwszego widocznego okresu na starcie (okno kończy się na bieżącym okresie)
 
 
 def periods_between(first: date, last: date, interval: str) -> int:
@@ -1354,57 +1345,51 @@ def period_starts(end: date, interval: str, length: int = COUNT_WINDOW) -> list[
     return [shift_period(end, interval, -back) for back in range(length - 1, -1, -1)]
 
 
-def count_window(
-    today: date, interval: str, shift: int, first_workout: date | None, last_done: date | None
-) -> CountWindow:
-    """Okno 12 okresów kończące się `shift` okresów od bieżącego; `shift` jest ograniczany do granic.
+def count_tape(today: date, interval: str, first_workout: date | None, last_done: date | None) -> CountTape:
+    """Taśma wszystkich okresów wykresu liczby treningów.
 
-    Górna granica końca okna: późniejszy z okresów - bieżący i najnowszego wykonanego treningu. Dolna: okno zaczyna się
-    najwcześniej w okresie pierwszego treningu; gdy historia jest krótsza niż okno (lub jej nie ma), nie ma cofania."""
+    Od okresu pierwszego treningu do górnej granicy: późniejszego z okresów - bieżącego i najnowszego wykonanego
+    treningu. Brak treningów: 12 okresów kończących się na bieżącym. Historia krótsza niż 12 okresów daje krótszą
+    taśmę, która mieści się w oknie w całości."""
     current = period_range(today, interval)[0]
-    max_end = max(current, period_range(last_done, interval)[0]) if last_done else current
-    max_shift = periods_between(current, max_end, interval) - 1
-    min_shift = 0
-    if first_workout:
-        earliest_end = shift_period(first_workout, interval, COUNT_WINDOW - 1)
-        if earliest_end <= current:
-            min_shift = 1 - periods_between(earliest_end, current, interval)
-    shift = max(min_shift, min(max_shift, shift))
-    end = shift_period(current, interval, shift)
-    starts = period_starts(end, interval)
-    if first_workout:
-        oldest = period_range(first_workout, interval)[0]
-        starts = [d for d in starts if d >= oldest] or starts[-1:]
-    return CountWindow(shift, end, starts, min_shift, max_shift)
+    upper = max(current, period_range(last_done, interval)[0]) if last_done else current
+    if first_workout is None:
+        count = COUNT_WINDOW
+    else:
+        count = periods_between(first_workout, upper, interval)
+    starts = period_starts(upper, interval, max(count, 1))
+    visible = min(COUNT_WINDOW, len(starts))
+    first = periods_between(starts[0], current, interval) - visible  # okno kończy się na bieżącym okresie
+    return CountTape(starts, visible, clamp_first_index(first, len(starts), visible))
 
 
-def navigate_count_window(
-    today: date, interval: str, shift: int, delta: int, first_workout: date | None, last_done: date | None
-) -> int:
-    """Nowe przesunięcie okna po kroku `delta` (-1 starsze, 1 nowsze); poza granicami zwraca dotychczasowe."""
-    window = count_window(today, interval, shift, first_workout, last_done)
-    target = window.shift + delta
-    return target if window.min_shift <= target <= window.max_shift else window.shift
+def clamp_first_index(index: int, count: int, visible: int) -> int:
+    """Indeks pierwszego widocznego okresu ograniczony do [0, count - visible]."""
+    return max(0, min(max(count - visible, 0), index))
 
 
-COUNT_SWIPE_FRACTION = 0.15  # część szerokości obszaru wykresu odpowiadająca jednemu okresowi przesunięcia
+def drag_tape_shift(dx: float, plot_width: float, slot: float, fraction: float | None = COUNT_SWIPE_FRACTION) -> float:
+    """Przesunięcie taśmy (px, ten sam znak co dx) dla przeciągnięcia o dx px: dx * slot / (fraction * plot_width).
+    Przeciągnięcie o `fraction` szerokości obszaru wykresu przesuwa taśmę dokładnie o jeden slot; `fraction` = None:
+    taśma podąża za palcem 1:1 (wykresy dni)."""
+    if fraction is None:
+        return dx
+    if plot_width <= 0:
+        return 0.0
+    return dx * slot / (fraction * plot_width)
 
 
-def swipe_periods(dx: float, width: float, fraction: float = COUNT_SWIPE_FRACTION) -> int:
-    """Liczba okresów (ze znakiem) dla przeciągnięcia o dx px w obszarze o szerokości width: odległość / (fraction * width)
-    w dół do całości; w lewo (dx < 0) dodatnia (nowsze dane), w prawo ujemna (starsze), poniżej progu 0."""
-    unit = fraction * width
-    if unit <= 0:
+def clamp_tape_left(left: float, slot: float, count: int, visible: int) -> float:
+    """Lewa krawędź taśmy względem okna (px, <= 0) ograniczona tak, by okno nie wyszło poza taśmę."""
+    return max(-max(count - visible, 0) * slot, min(0.0, left))
+
+
+def snap_tape_index(left: float, slot: float, count: int, visible: int) -> int:
+    """Indeks pierwszego widocznego okresu po dosunięciu taśmy w pozycji `left` do najbliższego pełnego slotu
+    (połówka w górę), w granicach taśmy."""
+    if slot <= 0:
         return 0
-    direction = interpret_swipe(dx, threshold=unit * (1 - 1e-9))  # tolerancja na błąd zmiennoprzecinkowy dokładnie na progu
-    if not direction:
-        return 0
-    return direction * int(abs(dx) / unit + 1e-9)
-
-
-def limit_swipe_periods(periods: int, shift: int, min_shift: int, max_shift: int) -> int:
-    """Ogranicza przesunięcie o `periods` tak, by `shift + wynik` leżał w [min_shift, max_shift] (stoi na granicy -> 0)."""
-    return max(min_shift - shift, min(max_shift - shift, periods))
+    return clamp_first_index(math.floor(-left / slot + 0.5), count, visible)
 
 
 def count_period_label(start: date, interval: str) -> str:
@@ -1478,6 +1463,87 @@ def compare_windows(days, end: date, interval: str, first_workout: date | None) 
         prev_average,
         None if before_first else percent_change(total, prev_total),
         None if before_first else percent_change(average, prev_average),
+    )
+
+
+# --- wykresy W1, W2, W3: jedna taśma dni, widoczne okno 31 dni (miesiąc) lub 7 dni (tydzień) ---
+DAY_WINDOWS = {"month": 31, "week": 7}
+
+
+class DayTape(NamedTuple):
+    start: date  # pierwszy dzień taśmy (początek okresu pierwszej wykonanej serii)
+    count: int  # liczba dni taśmy: do ostatniego dnia górnej granicy
+    visible: int  # liczba dni widocznych naraz: min(31 lub 7, długość taśmy)
+    first: int  # indeks pierwszego widocznego dnia na starcie (okno obejmuje bieżący okres)
+
+
+class DayChartData(NamedTuple):
+    points: list[tuple[int, float]]  # (indeks dnia na taśmie, wartość) tylko dla dni z wykonanymi seriami
+    scale: "AxisScale"  # stała skala osi Y z całej taśmy
+
+
+class WindowStats(NamedTuple):
+    start: date  # początek okresu przeważającego w oknie
+    label: str  # jego nazwa („Październik 2026”, „Tydzień 43, 2026”)
+    cards: tuple[StatCard, StatCard, StatCard]
+
+
+def tape_day(tape: DayTape, index: int) -> date:
+    return tape.start + timedelta(days=index)
+
+
+def initial_window_first(start: date, count: int, visible: int, today: date, interval: str) -> int:
+    """Indeks pierwszego dnia okna początkowego: okno wyrównane do początku bieżącego okresu, w granicach taśmy."""
+    return clamp_first_index((period_range(today, interval)[0] - start).days, count, visible)
+
+
+def day_tape(today: date, interval: str, first_done: date | None, last_done: date | None) -> DayTape:
+    """Taśma dni wybranego ćwiczenia: od początku okresu pierwszej wykonanej serii do końca górnej granicy (późniejszy
+    z okresów: bieżący i najnowszej wykonanej serii). Brak wykonanych serii: tylko bieżący okres. Taśma zawsze
+    obejmuje bieżący okres."""
+    current_start, current_end = period_range(today, interval)
+    start, end = current_start, current_end
+    if first_done is not None and last_done is not None:
+        start = min(period_range(first_done, interval)[0], current_start)
+        end = period_range(max(period_range(last_done, interval)[0], current_start), interval)[1]
+    count = (end - start).days + 1
+    visible = min(DAY_WINDOWS[interval], count)
+    return DayTape(start, count, visible, initial_window_first(start, count, visible, today, interval))
+
+
+def exercise_day_tape(daily: dict[date, DailyStats], today: date, interval: str) -> DayTape:
+    """Taśma dni dla dziennych wartości ćwiczenia (zawierają tylko dni z wykonanymi seriami)."""
+    return day_tape(today, interval, min(daily, default=None), max(daily, default=None))
+
+
+def tape_chart_data(daily: dict[date, DailyStats], tape: DayTape, today: date) -> tuple[DayChartData, DayChartData, DayChartData]:
+    """Punkty i stała skala osi Y trzech wykresów (W1, W2, W3) z całej taśmy; dni bez serii i przyszłe nie mają punktów."""
+    last = tape_day(tape, tape.count - 1)
+    days = [d for d in sorted(daily) if tape.start <= d <= min(last, today)]
+    result = []
+    for field in ("w1", "w2", "w3"):
+        points = [((d - tape.start).days, getattr(daily[d], field)) for d in days]
+        result.append(DayChartData(points, nice_axis_scale(v for _, v in points)))
+    return tuple(result)
+
+
+def dominant_period(tape: DayTape, first: int, interval: str) -> date:
+    """Początek okresu (miesiąca lub tygodnia ISO) zajmującego najwięcej dni okna zaczynającego się na `first`;
+    remis -> późniejszy okres."""
+    days: dict[date, int] = {}
+    for n in range(first, first + tape.visible):
+        start = period_range(tape_day(tape, n), interval)[0]
+        days[start] = days.get(start, 0) + 1
+    return max(days, key=lambda start: (days[start], start))
+
+
+def window_stats(
+    load_type: str, effort_type: str, daily: dict[date, DailyStats], tape: DayTape, first: int, interval: str, today: date
+) -> WindowStats:
+    """Pola statystyk i nazwa okresu dla całego okresu przeważającego w oknie zaczynającym się na `first`."""
+    start = dominant_period(tape, first, interval)
+    return WindowStats(
+        start, period_label(start, interval), exercise_stat_cards(load_type, effort_type, daily, start, interval, today)
     )
 
 
@@ -1617,6 +1683,13 @@ def y_axis_ticks(max_value: float, integer: bool = False, target: int = 4) -> tu
     count = math.ceil(round(max_value / step, 9))
     ticks = [round(i * step, 6) for i in range(count + 1)]
     return ticks[-1], ticks
+
+
+def count_axis_scale(counts) -> AxisScale:
+    """Stała skala osi Y całej taśmy: od 0 do „ładnej” liczby całkowitej >= największej liczby treningów
+    (same zera lub brak danych: 0-1)."""
+    top, ticks = y_axis_ticks(max(counts, default=0), integer=True)
+    return AxisScale(0, top, ticks)
 
 
 # --- dane testowe (czysta logika, bez bazy) ---

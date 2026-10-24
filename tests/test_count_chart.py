@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -9,19 +9,21 @@ from trainbeast.services import (
     compare_windows,
     count_by_period,
     count_period_label,
-    count_window,
+    clamp_tape_left,
+    count_axis_scale,
+    count_tape,
+    drag_tape_shift,
     fmt_average,
     fmt_workouts,
-    navigate_count_window,
-    limit_swipe_periods,
+    snap_tape_index,
     nice_axis_scale,
-    swipe_periods,
     period_starts,
     workouts_total_and_average,
     workouts_word,
 )
 
 TODAY = date(2026, 10, 23)
+ONE_WEEK = timedelta(weeks=1)
 
 
 @pytest.fixture
@@ -57,62 +59,59 @@ def test_week_label_iso_year_boundary():
     assert count_period_label(date(2026, 4, 6), "week") == "15 2026"
 
 
-def test_week_window_across_year_boundary():
-    window = count_window(date(2026, 1, 1), "week", 0, None, None)  # 1.01.2026 to czwartek tygodnia 1
-    assert window.end == date(2025, 12, 29)
-    assert count_period_label(window.starts[-1], "week") == "01 2026"
-    assert count_period_label(window.starts[-2], "week") == "52 2025"
-    assert len(window.starts) == 12
+def test_week_tape_across_year_boundary():
+    tape = count_tape(date(2026, 1, 1), "week", date(2025, 11, 3), None)  # 1.01.2026 to czwartek tygodnia 1
+    assert tape.starts[0] == date(2025, 12, 29) - 8 * ONE_WEEK
+    assert tape.starts[-1] == date(2025, 12, 29)
+    labels = [count_period_label(d, "week") for d in tape.starts]
+    assert labels[-1] == "01 2026" and labels[-2] == "52 2025" and len(labels) == 9
 
 
-# --- okno ---
-def test_window_no_workouts_is_current_without_scrolling():
-    window = count_window(TODAY, "month", 0, None, None)
-    assert len(window.starts) == 12 and window.end == date(2026, 10, 1)
-    assert window.starts[0] == date(2025, 11, 1)
-    assert (window.min_shift, window.max_shift) == (0, 0)
-    assert navigate_count_window(TODAY, "month", 0, -1, None, None) == 0
+def test_week_tape_contains_week_53():
+    tape = count_tape(date(2021, 1, 20), "week", date(2020, 11, 2), None)
+    labels = [count_period_label(d, "week") for d in tape.starts]
+    assert labels[labels.index("53 2020") + 1] == "01 2021"
+    assert len(set(labels)) == len(labels) == 12
 
 
-def test_window_back_to_first_workout():
+def test_month_tape_from_first_workout_to_current():
     first = date(2024, 1, 15)
-    window = count_window(TODAY, "month", -50, first, first)
-    assert window.shift == window.min_shift == -22
-    assert window.starts[0] == date(2024, 1, 1) and window.end == date(2024, 12, 1)
-    assert len(window.starts) == 12
-    assert navigate_count_window(TODAY, "month", -22, -1, first, first) == -22
-    assert navigate_count_window(TODAY, "month", -21, -1, first, first) == -22
+    tape = count_tape(TODAY, "month", first, first)
+    assert tape.starts[0] == date(2024, 1, 1) and tape.starts[-1] == date(2026, 10, 1)
+    assert len(tape.starts) == 34 and tape.visible == 12
+    assert tape.first == 34 - 12  # okno kończy się na bieżącym okresie
+    assert all(count_period_label(d, "month") for d in tape.starts)
 
 
-def test_window_short_history_shows_from_first_workout_and_cannot_move():
+def test_tape_no_workouts_is_twelve_periods_without_scrolling_room():
+    tape = count_tape(TODAY, "month", None, None)
+    assert len(tape.starts) == 12 and tape.visible == 12 and tape.first == 0
+    assert tape.starts[0] == date(2025, 11, 1) and tape.starts[-1] == date(2026, 10, 1)
+    assert count_by_period([], tape.starts, "month") == [0] * 12
+
+
+def test_tape_short_history_not_longer_than_window():
     first = date(2026, 7, 10)
-    window = count_window(TODAY, "month", 0, first, first)
-    assert window.starts == [date(2026, 7, 1), date(2026, 8, 1), date(2026, 9, 1), date(2026, 10, 1)]
-    assert (window.min_shift, window.max_shift) == (0, 0)
-    assert navigate_count_window(TODAY, "month", 0, -1, first, first) == 0
-    assert navigate_count_window(TODAY, "month", 0, 1, first, first) == 0
+    tape = count_tape(TODAY, "month", first, first)
+    assert tape.starts == [date(2026, 7, 1), date(2026, 8, 1), date(2026, 9, 1), date(2026, 10, 1)]
+    assert tape.visible == 4 and tape.first == 0
+    assert snap_tape_index(-500, 25, len(tape.starts), tape.visible) == 0  # nie ma dokąd przesuwać
 
 
-def test_window_last_workout_in_current_period_blocks_forward():
+def test_tape_exactly_twelve_periods():
+    tape = count_tape(TODAY, "month", date(2025, 11, 30), None)
+    assert len(tape.starts) == 12 and tape.visible == 12 and tape.first == 0
+
+
+def test_tape_upper_bound_is_later_of_current_and_last_done():
     first = date(2025, 1, 1)
-    assert navigate_count_window(TODAY, "month", 0, 1, first, date(2026, 10, 2)) == 0
-    assert navigate_count_window(TODAY, "week", 0, 1, first, date(2026, 10, 20)) == 0  # tydzień 19-25.10
-
-
-def test_window_last_workout_earlier_than_current_keeps_current_upper_bound():
-    first = date(2025, 1, 1)
-    window = count_window(TODAY, "month", 5, first, date(2026, 5, 3))
-    assert window.max_shift == 0 and window.shift == 0 and window.end == date(2026, 10, 1)
-
-
-def test_window_last_workout_later_than_current_moves_upper_bound():
-    first = date(2025, 1, 1)
-    last_done = date(2026, 12, 5)
-    window = count_window(TODAY, "month", 0, first, last_done)
-    assert window.max_shift == 2
-    assert navigate_count_window(TODAY, "month", 1, 1, first, last_done) == 2
-    assert navigate_count_window(TODAY, "month", 2, 1, first, last_done) == 2  # dalej nie ma
-    assert count_window(TODAY, "month", 2, first, last_done).end == date(2026, 12, 1)
+    assert count_tape(TODAY, "month", first, date(2026, 5, 3)).starts[-1] == date(2026, 10, 1)  # wcześniejszy: bieżący
+    assert count_tape(TODAY, "month", first, date(2026, 10, 2)).starts[-1] == date(2026, 10, 1)
+    later = count_tape(TODAY, "month", first, date(2026, 12, 5))
+    assert later.starts[-1] == date(2026, 12, 1)
+    assert later.first == len(later.starts) - 12 - 2  # początkowe okno nadal kończy się na bieżącym okresie
+    week = count_tape(TODAY, "week", first, date(2026, 11, 3))
+    assert week.starts[-1] == date(2026, 11, 2)
 
 
 def test_service_workout_without_done_sets_does_not_move_boundary(svc):
@@ -121,7 +120,7 @@ def test_service_workout_without_done_sets_does_not_move_boundary(svc):
     add_workout(svc, date(2026, 12, 20), chest, done=False)  # przyszły trening bez wykonanych serii
     assert svc.get_last_done_workout_date() == date(2026, 10, 5)
     first, last = svc.get_first_workout_date(), svc.get_last_done_workout_date()
-    assert navigate_count_window(TODAY, "month", 0, 1, first, last) == 0
+    assert count_tape(TODAY, "month", first, last).starts[-1] == date(2026, 10, 1)
     add_workout(svc, date(2026, 12, 22), chest, done=True)
     assert svc.get_last_done_workout_date() == date(2026, 12, 22)
 
@@ -317,34 +316,71 @@ def test_axis_scale_ticks_evenly_spaced():
     assert scale.ticks[0] == scale.lower and scale.ticks[-1] == scale.upper
 
 
-# --- przesuwanie wykresu: próg 15% szerokości na okres ---
+# --- stała skala osi Y z całej taśmy ---
+def test_axis_scale_comes_from_whole_tape_not_window():
+    counts = [0] * 10 + [9] + [1] * 21  # maksimum poza ostatnim oknem 12 okresów
+    assert count_axis_scale(counts).upper >= 9
+    assert count_axis_scale(counts[-12:]).upper < 9
+    scale = count_axis_scale(counts)
+    assert scale.lower == 0 and all(float(t).is_integer() for t in scale.ticks)
+
+
+def test_axis_scale_all_zeros_default_range():
+    assert count_axis_scale([0] * 12) == (0, 1, [0, 1])
+    assert count_axis_scale([]) == (0, 1, [0, 1])
+
+
+def test_section_filter_changes_values_and_scale(svc):
+    cats = [c.name for c in svc.get_categories()]
+    for day in (date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 3)):
+        add_workout(svc, day, cats[0], done=True)
+    add_workout(svc, date(2026, 9, 5), cats[1], done=True)
+    tape = count_tape(TODAY, "month", svc.get_first_workout_date(), svc.get_last_done_workout_date())
+    everything = count_by_period(svc.get_workout_days(cats), tape.starts, "month")
+    only_second = count_by_period(svc.get_workout_days([cats[1]]), tape.starts, "month")
+    assert everything[-2:] == [1, 3] and only_second[-2:] == [1, 0]
+    assert count_axis_scale(everything).upper > count_axis_scale(only_second).upper
+    assert tape.starts == count_tape(TODAY, "month", svc.get_first_workout_date(), svc.get_last_done_workout_date()).starts
+
+
+# --- przesuwanie taśmy: 15% szerokości obszaru = 1 slot ---
 W = 300.0
+SLOT = W / 12
 
 
-@pytest.mark.parametrize(
-    "percent, expected",
-    [(0, 0), (14, 0), (15, 1), (29, 1), (30, 2), (44.9, 2), (45, 3), (90, 6)],
-)
-def test_swipe_periods_threshold_both_directions(percent, expected):
+@pytest.mark.parametrize("percent, slots", [(0, 0), (7.5, 0.5), (15, 1), (30, 2), (45, 3)])
+def test_drag_shift_rule_percent_of_width_to_slots(percent, slots):
     dx = percent / 100 * W
-    assert swipe_periods(-dx, W) == expected  # w lewo: nowsze (dodatnie)
-    assert swipe_periods(dx, W) == -expected  # w prawo: starsze (ujemne)
+    assert drag_tape_shift(dx, W, SLOT) == pytest.approx(slots * SLOT)  # w prawo: taśma w prawo (starsze dane)
+    assert drag_tape_shift(-dx, W, SLOT) == pytest.approx(-slots * SLOT)
 
 
-def test_swipe_periods_zero_and_invalid_width():
-    assert swipe_periods(0, W) == 0
-    assert swipe_periods(-100, 0) == 0
+def test_drag_shift_invalid_width():
+    assert drag_tape_shift(100, 0, 10) == 0.0
 
 
-@pytest.mark.parametrize(
-    "periods, shift, expected",
-    [(3, -5, 3), (-3, -5, -3), (-5, -3, -5), (5, -3, 3), (-2, -3, -2), (-1, 0, -1), (1, 0, 0), (0, -2, 0), (-4, -22, 0)],
-)
-def test_limit_swipe_periods(periods, shift, expected):
-    # okno [-22, 0]; poza granicą zatrzymanie na granicy, na granicy 0
-    assert limit_swipe_periods(periods, shift, -22, 0) == expected
+@pytest.mark.parametrize("left, index", [(0, 0), (-0.49 * SLOT, 0), (-0.5 * SLOT, 1), (-0.51 * SLOT, 1), (-1.49 * SLOT, 1), (-1.5 * SLOT, 2), (-3 * SLOT, 3)])
+def test_snap_to_full_slot_rounds_both_ways(left, index):
+    assert snap_tape_index(left, SLOT, 40, 12) == index
 
 
-def test_limit_swipe_periods_stops_at_boundary_not_ignores():
-    assert limit_swipe_periods(-5, -20, -22, 0) == -2
-    assert limit_swipe_periods(4, -1, -22, 0) == 1
+def test_snap_clamped_to_tape_start_and_end():
+    assert snap_tape_index(+5 * SLOT, SLOT, 40, 12) == 0  # za początkiem
+    assert snap_tape_index(-100 * SLOT, SLOT, 40, 12) == 28  # za końcem: ostatnie okno
+    assert snap_tape_index(-27.6 * SLOT, SLOT, 40, 12) == 28
+
+
+def test_clamp_tape_left_boundaries():
+    assert clamp_tape_left(10, SLOT, 40, 12) == 0
+    assert clamp_tape_left(-1000, SLOT, 40, 12) == -28 * SLOT
+    assert clamp_tape_left(-3.3 * SLOT, SLOT, 40, 12) == pytest.approx(-3.3 * SLOT)
+    assert clamp_tape_left(-50, SLOT, 12, 12) == 0  # taśma nie dłuższa niż okno
+
+
+def test_drag_then_snap_gives_first_visible_index():
+    start = 10 * SLOT  # okno zaczyna się od okresu 10
+    for percent, expected in [(0, 10), (15, 9), (30, 8), (-15, 11), (-45, 13), (60, 6)]:
+        left = clamp_tape_left(-start + drag_tape_shift(percent / 100 * W, W, SLOT), SLOT, 40, 12)
+        assert snap_tape_index(left, SLOT, 40, 12) == expected
+    left = clamp_tape_left(-start + drag_tape_shift(-100 * W, W, SLOT), SLOT, 40, 12)
+    assert snap_tape_index(left, SLOT, 40, 12) == 28

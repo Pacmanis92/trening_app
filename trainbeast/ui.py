@@ -25,25 +25,26 @@ from .services import (
     StatColumn,
     WorkoutSnapshot,
     allowed_units,
+    clamp_first_index,
+    clamp_tape_left,
     compare_windows,
+    count_axis_scale,
+    count_tape,
+    drag_tape_shift,
+    snap_tape_index,
     count_by_period,
     count_period_label,
-    count_window,
-    default_selected_index,
     ease_out_cubic,
-    exercise_stat_cards,
+    exercise_day_tape,
+    last_point_in_window,
+    tape_chart_data,
+    tape_day,
+    window_stats,
     fmt_average,
     fmt_percent,
     fmt_workouts,
     nearest_day_index,
-    limit_swipe_periods,
-    navigate_period,
-    nice_axis_scale,
-    period_label,
     period_label_step,
-    period_range,
-    period_series,
-    interpret_swipe,
     done_sets_count,
     has_snapshot_to_paste,
     fmt_decimal,
@@ -69,11 +70,9 @@ from .services import (
     settle_target,
     shift_month,
     stat_titles,
-    swipe_periods,
     workouts_total_and_average,
     summarize_exercise,
     weekday_abbr,
-    y_axis_ticks,
 )
 
 BTN_HEIGHT = 60
@@ -142,11 +141,13 @@ CHART_GRID_LINE_COLOR = "#FFFFFF"  # poziome przerywane linie siatki wszystkich 
 CHART_TOOLTIP_ROOM = 36  # miejsce nad wykresem na dymek najwyższego punktu
 SELECTED_DOT_RADIUS = 6
 STAT_LABEL_HEIGHT = 32  # dwie linie etykiety (czcionka 12): wartości obu kolumn leżą na jednej wysokości
+STAT_SUBLABEL_HEIGHT = 14  # podpis okresu pod etykietą kolumny (czcionka 10)
 STATS_DIVIDER_HEIGHT = 92  # pionowa linia między kolumnami statystyk
 STAT_CARD_BG = FILL_DARK  # pole statystyk: ciemniejsze niż karta wykresu, z cienką ramką
 CHART_TOOLTIP_BG = "#1b1d20"
 CHART_TOOLTIP_BORDER = "#d9d9d9"
 CHART_LABEL_BOX = (14, 48)  # (szerokość, wysokość) pola obróconej etykiety: mieści pogrubione „WW RRRR” (ok. 44 px) z zapasem
+TAPE_SETTLE_SECONDS = 0.25  # dosunięcie taśmy wykresu liczby treningów do pełnego slotu
 CHART_LABEL_GAP = 6  # odstęp między osią X a polem etykiety: linia zaznaczenia nie zachodzi na etykietę
 CHART_BOTTOM_AXIS = CHART_LABEL_BOX[1] + CHART_LABEL_GAP  # stała rezerwa pod osią (nie zależy od zaznaczenia)
 UP_COLOR = ft.Colors.GREEN_400
@@ -274,21 +275,31 @@ class PeriodChart:
         scale: AxisScale,
         footer: ft.Control,
         page_width: float,
+        on_shift,
+        visible: int,
         highlight_label: bool = False,
-        on_shift=None,
+        first: int = 0,
+        follow_finger: bool = False,
     ):
         """points: (pozycja na osi X, wartość) tylko dla slotów z danymi; tip_titles: nagłówek dymku każdego punktu;
         axis_labels: etykiety wszystkich slotów osi X; value_text: wartość -> napis w dymku; scale: skala osi Y.
-        on_shift: async (wykres, liczba okresów ze znakiem); gdy podane, przeciąganie przesuwa tylko zawartość wykresu
-        (linię z punktami, etykiety osi X i zaznaczenie) w obrębie obszaru wykresu, a oś Y i siatka stoją w miejscu."""
+        Wykres jest taśmą wszystkich slotów, z której widać `visible` slotów od indeksu `first`: przeciąganie przesuwa
+        tylko taśmę (linię z punktami, etykiety osi X i zaznaczenie), a oś Y i siatka stoją w miejscu.
+        on_shift: async (wykres, indeks pierwszego widocznego slotu), wołane po zatrzymaniu taśmy w nowej pozycji.
+        follow_finger: taśma podąża za palcem 1:1 (dni); inaczej 15% szerokości = jeden slot (okresy)."""
         self.title, self.points, self.tip_titles, self.axis_labels = title, points, tip_titles, axis_labels
         self.count, self.value_text, self.scale, self.highlight_label = len(axis_labels), value_text, scale, highlight_label
-        self.selected = default_selected_index(points)
+        self.heading_extra = heading_extra
         self.on_shift = on_shift
+        self.visible = visible
+        self.follow_finger = follow_finger
+        self.first = clamp_first_index(first, self.count, self.visible)
+        self.selected = self._last_in_window(self.first)
         self.busy = False
         self.layer: ft.Container | None = None
         self.viewport: ft.Stack | None = None
-        self._drag: list[float] = []  # [x startu, ostatnie przesunięcie]
+        self._drag: list[float] = []  # [x startu, lewa krawędź taśmy na starcie, aktualna lewa krawędź]
+        self.footer_host = ft.Container(footer)
         self.width = max(page_width - 2 * SCREEN_MARGIN - 24 - 12, 100.0)  # karta (padding 12) i prawy odstęp 12; poprawiane on_size_change
         self.chart_host = ft.Container(padding=ft.Padding.only(right=12))
         # tytuł i okres w jednym wierszu; gdy się nie mieszczą, okres przechodzi pod tytuł (nic nie jest ucinane)
@@ -312,13 +323,15 @@ class PeriodChart:
             bgcolor=STATS_CARD_BG,
             border_radius=CARD_RADIUS,
         )
-        self.control = ft.Column([chart_card, footer], spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.control = ft.Column([chart_card, self.footer_host], spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self.chart_host.on_size_change = self._on_size
         self._build()
 
+    def _last_in_window(self, first: int) -> int | None:
+        """Indeks punktu zaznaczanego domyślnie w oknie od `first`: ostatni dzień (okres) z danymi; brak danych -> None."""
+        return last_point_in_window([x for x, _ in self.points], first, self.visible)
+
     def _gesture(self) -> ft.GestureDetector:
-        if self.on_shift is None:
-            return ft.GestureDetector(self.chart_host, on_tap_down=self._on_tap)
         return ft.GestureDetector(
             self.chart_host,
             on_tap_down=self._on_tap,
@@ -331,73 +344,90 @@ class PeriodChart:
 
     @property
     def plot_width(self) -> float:
+        """Szerokość widocznego obszaru wykresu (bez osi Y)."""
         return max(self.width - STATS_LEFT_AXIS_WIDTH, 1.0)
 
+    @property
+    def slot(self) -> float:
+        """Szerokość slotu jednego okresu: obszar wykresu / liczba widocznych okresów."""
+        return self.plot_width / self.visible
+
+    @property
+    def tape_width(self) -> float:
+        return self.slot * self.count
+
+    @property
+    def scrollable(self) -> bool:
+        return self.count > self.visible
+
+    def _left_to_offset(self, left: float) -> ft.Offset:
+        """Lewa krawędź taśmy (px) -> offset warstwy (ułamek jej własnej szerokości)."""
+        return ft.Offset(left / self.tape_width, 0)
+
     def _drag_start(self, e: ft.DragStartEvent) -> None:
-        if not self.busy and self.layer is not None:
-            self._drag = [e.global_position.x, 0.0]
+        if not self.busy and self.layer is not None and self.scrollable:
+            left = -self.first * self.slot
+            self._drag = [e.global_position.x, left, left]
 
     def _drag_update(self, e: ft.DragUpdateEvent) -> None:
         if not self._drag or self.busy or self.layer is None:
             return
-        width = self.plot_width
-        self._drag[1] = max(-width, min(width, e.global_position.x - self._drag[0]))
-        self.layer.offset = ft.Offset(self._drag[1] / width, 0)  # zawartość podąża za palcem
+        dx = e.global_position.x - self._drag[0]
+        shift = drag_tape_shift(dx, self.plot_width, self.slot, None) if self.follow_finger else drag_tape_shift(dx, self.plot_width, self.slot)
+        self._drag[2] = clamp_tape_left(self._drag[1] + shift, self.slot, self.count, self.visible)
+        self.layer.offset = self._left_to_offset(self._drag[2])  # taśma podąża za palcem
         self.layer.update()
 
     async def _drag_end(self, e: ft.DragEndEvent) -> None:
         if not self._drag or self.busy:
             return
-        dx, self._drag = self._drag[1], []
-        self.busy = True  # w trakcie animacji kolejne gesty są ignorowane
-        try:
-            await self.on_shift(self, swipe_periods(dx, self.plot_width))
-        finally:
-            self.busy = False
+        left, self._drag = self._drag[2], []
+        await self._settle(left)
 
     async def _drag_cancel(self, e=None) -> None:
         if self._drag and not self.busy:
-            self._drag = []
-            self.busy = True
-            try:
-                await self.snap_back()
-            finally:
-                self.busy = False
+            left, self._drag = self._drag[2], []
+            await self._settle(left)
 
-    async def _animate(self, start: float, target: float, incoming: ft.Container | None = None, delta: int = 0) -> None:
-        """Przesuwa warstwę z offsetu `start` do `target` (ułamek szerokości obszaru); `incoming` (warstwa) jedzie obok niej
-        (jego offset = offset warstwy + delta)."""
+    async def _settle(self, left: float) -> None:
+        """Dosuwa taśmę z pozycji `left` do pełnego slotu; w trakcie animacji kolejne gesty są ignorowane. Zaznaczenie
+        przechodzi na ostatni punkt z danymi w nowym oknie (jedzie razem z taśmą), a `on_shift` jest wołane po jej
+        zatrzymaniu."""
+        self.busy = True
+        try:
+            index = snap_tape_index(left, self.slot, self.count, self.visible)
+            moved = index != self.first
+            if moved:
+                self.first = index
+                self.selected = self._last_in_window(index)
+                self.layer = self._make_layer(self._left_to_offset(left))  # ta sama pozycja, nowe zaznaczenie
+                self.viewport.controls = [self.layer]
+                self.viewport.update()
+            await self._animate(left, -index * self.slot)
+            if moved:
+                await self.on_shift(self, index)
+        finally:
+            self.busy = False
+
+    async def _animate(self, start: float, target: float) -> None:
+        """Przesuwa taśmę z lewej krawędzi `start` do `target` (px); czas i krzywa jak w pozostałych animacjach."""
+        if self.layer is None or abs(target - start) < 0.5:
+            if self.layer is not None:
+                self.layer.offset = self._left_to_offset(target)
+                self.layer.update()
+            return
         layer, viewport = self.layer, self.viewport
-        duration = settle_duration(-start, -target, self.plot_width)
         began = time.perf_counter()
         while True:
-            t = min(1.0, (time.perf_counter() - began) / duration)
-            offset = start + (target - start) * ease_out_cubic(t)  # krzywa i czas jak w pozostałych animacjach
-            layer.offset = ft.Offset(offset, 0)
-            if incoming is not None:
-                incoming.offset = ft.Offset(offset + delta, 0)
-            viewport.update()
+            t = min(1.0, (time.perf_counter() - began) / TAPE_SETTLE_SECONDS)
+            layer.offset = self._left_to_offset(start + (target - start) * ease_out_cubic(t))
+            try:
+                viewport.update()
+            except RuntimeError:  # wykres został w międzyczasie przebudowany (np. zmiana filtra): nie ma już czego animować
+                return
             if t >= 1.0:
                 break
             await asyncio.sleep(0.012)
-
-    async def snap_back(self) -> None:
-        """Zawartość wraca na miejsce (przesunięcie poniżej progu lub granica okna)."""
-        if self.layer is not None and self.layer.offset and self.layer.offset.x:
-            await self._animate(self.layer.offset.x, 0.0)
-
-    async def slide_in(self, incoming: "PeriodChart", delta: int) -> None:
-        """Dotychczasowa zawartość wyjeżdża (delta = 1 w lewo, nowsze dane), zawartość `incoming` nadjeżdża z przeciwnej strony."""
-        if self.layer is None or self.viewport is None:
-            return
-        incoming.width = self.width
-        arriving = incoming._make_layer()  # tylko do animacji; `incoming` zachowuje własną, niepodpiętą warstwę
-        start = self.layer.offset.x if self.layer.offset else 0.0
-        arriving.offset = ft.Offset(start + delta, 0)
-        self.viewport.controls.append(arriving)
-        self.viewport.update()
-        await asyncio.sleep(0.03)
-        await self._animate(start, -float(delta), arriving, delta)
 
     def _on_size(self, e) -> None:
         width = e.width - 12
@@ -407,10 +437,14 @@ class PeriodChart:
             self.chart_host.update()
 
     def _on_tap(self, e: ft.TapEvent) -> None:
-        if not self.points:
+        if not self.points or self.busy:
             return
-        guess = nearest_day_index(e.local_position.x, STATS_LEFT_AXIS_WIDTH, self.width, self.count)
-        chosen = min(range(len(self.points)), key=lambda n: abs(self.points[n][0] - guess))
+        # dotknięcie przeliczone o aktualne przesunięcie taśmy; do wyboru tylko punkty widocznego okna
+        guess = nearest_day_index(e.local_position.x + self.first * self.slot, STATS_LEFT_AXIS_WIDTH, STATS_LEFT_AXIS_WIDTH + self.tape_width, self.count)
+        inside = [n for n, (x, _) in enumerate(self.points) if self.first <= x < self.first + self.visible]
+        if not inside:
+            return
+        chosen = min(inside, key=lambda n: abs(self.points[n][0] - guess))
         if chosen != self.selected:
             self.selected = chosen
             self._build()
@@ -422,7 +456,7 @@ class PeriodChart:
         if self.selected is None:
             return []
         day_index, value = self.points[self.selected]
-        plot_w = self.width - STATS_LEFT_AXIS_WIDTH
+        plot_w = self.tape_width
         plot_h = STATS_CHART_HEIGHT - CHART_BOTTOM_AXIS
         x = STATS_LEFT_AXIS_WIDTH + (day_index + 0.5) / self.count * plot_w - origin
         lower, upper = self.scale.lower, self.scale.upper
@@ -448,6 +482,7 @@ class PeriodChart:
             left=x - SELECTED_DOT_RADIUS,
             top=y - SELECTED_DOT_RADIUS,
         )
+        window_left = self.first * self.slot  # lewa krawędź widocznego okna na taśmie
         value_text = self.value_text(value)
         tip_w = max(96.0, 22 + 8.5 * len(value_text))
         tip_h = 46.0
@@ -466,7 +501,7 @@ class PeriodChart:
             bgcolor=CHART_TOOLTIP_BG,
             border=ft.Border.all(1, CHART_TOOLTIP_BORDER),
             border_radius=8,
-            left=min(max(x - tip_w / 2, 0), max(self.width - origin - tip_w, 0)),  # nie wychodzi poza kartę (obszar)
+            left=min(max(x - tip_w / 2, window_left), max(window_left + self.width - origin - tip_w, window_left)),  # nie wychodzi poza kartę (okno)
             top=max(y - SELECTED_DOT_RADIUS - 4 - tip_h, 0),
         )
         return [line, dot, tip]
@@ -477,7 +512,7 @@ class PeriodChart:
     def _line_chart(self, *, data: bool, grid: bool, y_labels: bool, x_labels: bool, **place) -> fch.LineChart:
         """LineChart o stałej geometrii (te same osie i rezerwy), z wybranymi elementami: dane, siatka, etykiety osi."""
         count, ticks = self.count, self.scale.ticks
-        step = period_label_step(count, self.width - STATS_LEFT_AXIS_WIDTH)
+        step = period_label_step(self.visible, self.plot_width)
         points = [
             fch.LineChartDataPoint(x, v, point=fch.ChartCirclePoint(color=ACCENT, radius=3), show_tooltip=False)
             for x, v in self.points
@@ -518,27 +553,27 @@ class PeriodChart:
             **place,
         )
 
-    def _make_layer(self) -> ft.Container:
-        """Przesuwana zawartość: linia z punktami, etykiety osi X i zaznaczenie (osobny egzemplarz przy każdym wywołaniu)."""
-        content = self._line_chart(data=True, grid=False, y_labels=False, x_labels=True, left=-STATS_LEFT_AXIS_WIDTH, width=self.width)
+    def _make_layer(self, offset: ft.Offset | None = None) -> ft.Container:
+        """Taśma: linia z punktami, etykiety osi X wszystkich okresów i zaznaczenie (osobny egzemplarz przy każdym
+        wywołaniu); szerokość = liczba okresów × slot, położenie wyraża offset (domyślnie okno zaczyna się od `first`)."""
+        tape_w = self.tape_width
+        content = self._line_chart(data=True, grid=False, y_labels=False, x_labels=True, left=-STATS_LEFT_AXIS_WIDTH, width=tape_w + STATS_LEFT_AXIS_WIDTH)
         return ft.Container(
             ft.Stack([content, *self._overlay(STATS_LEFT_AXIS_WIDTH)], clip_behavior=ft.ClipBehavior.NONE),
-            width=self.plot_width,
+            width=tape_w,
             height=CHART_TOOLTIP_ROOM + STATS_CHART_HEIGHT,
-            offset=ft.Offset(0, 0),
+            left=0,
+            top=0,
+            offset=offset or self._left_to_offset(-self.first * self.slot),
         )
 
     def _build(self) -> None:
         height = CHART_TOOLTIP_ROOM + STATS_CHART_HEIGHT
-        if self.on_shift is None:
-            chart = self._line_chart(data=True, grid=True, y_labels=True, x_labels=True, left=0, right=0)
-            self.chart_host.content = ft.Stack([chart, *self._overlay()], height=height)
-            return
-        # oś Y i siatka stoją w tle; dane, etykiety osi X i zaznaczenie leżą w warstwie przesuwanej w obrębie obszaru wykresu
+        # oś Y i siatka stoją w tle; taśma leży w oknie przyciętym do obszaru wykresu i przesuwa się w nim poziomo
         background = self._line_chart(data=False, grid=True, y_labels=True, x_labels=False, left=0, right=0)
         plot_w = self.plot_width
         self.layer = self._make_layer()
-        self.viewport = ft.Stack([self.layer], width=plot_w, height=height)
+        self.viewport = ft.Stack([self.layer], width=plot_w, height=height, clip_behavior=ft.ClipBehavior.HARD_EDGE)
         clip = ft.Container(self.viewport, width=plot_w, height=height, clip_behavior=ft.ClipBehavior.HARD_EDGE, left=STATS_LEFT_AXIS_WIDTH, top=0)
         self.chart_host.content = ft.Stack([background, clip], height=height)
 
@@ -558,9 +593,9 @@ class TrainBeastApp:
         self._calendar_layer = None
         self.stats_exercise = None  # wybrane ćwiczenie w zakładce Statystyki (tylko UI)
         self.stats_interval = "month"
-        self.stats_period_start: date | None = None  # początek wyświetlanego okresu (None = bieżący); wspólny dla trzech wykresów
-        self._period_busy = False  # trwa animacja zmiany okresu: kolejne gesty ignorowane
-        self.count_shift = 0  # przesunięcie okna wykresu liczby treningów względem bieżącego okresu (tylko UI)
+        self.day_charts: list[PeriodChart] = []  # trzy wykresy dni aktualnie wybranego ćwiczenia
+        self.stats_first: list[int | None] = [None, None, None]  # indeks pierwszego widocznego dnia taśmy każdego z trzech wykresów; None = okno bieżącego okresu (tylko UI)
+        self.count_first: int | None = None  # indeks pierwszego widocznego okresu taśmy wykresu liczby treningów; None = okno kończy się na bieżącym okresie (tylko UI)
         self.count_deselected: set[str] = set()  # odznaczone sekcje filtra (do końca sesji; nowe sekcje są zaznaczone)
         self._info_texts: dict[str, ft.Text] = {}
         self._reset_swipe()
@@ -740,8 +775,8 @@ class TrainBeastApp:
             self._build_stats_view()
         self.nav.switch_tab(key)
         if key == TAB_STATS:
-            self.stats_period_start = None
-            self.count_shift = 0
+            self.stats_first = [None, None, None]
+            self.count_first = None
             self._refresh_stats(update=False)
         self._apply_tab()
 
@@ -800,8 +835,6 @@ class TrainBeastApp:
             border=ft.Border.all(1, ACCENT),
             border_radius=CARD_RADIUS,
         )
-        # okno przesuwania okresów: bieżący blok wykresów leży w układzie, nadjeżdżający jest dokładany nad nim (zob. _change_period)
-        self.period_slider = ft.Stack([], clip_behavior=ft.ClipBehavior.HARD_EDGE)
         self.count_slider = ft.Stack([], clip_behavior=ft.ClipBehavior.HARD_EDGE)
         self.stats_charts = ft.Column(
             scroll=ft.ScrollMode.AUTO,
@@ -830,13 +863,14 @@ class TrainBeastApp:
 
     def _pick_stats_exercise(self, exercise_id: int) -> None:
         self.stats_exercise = next((x for x in self.service.list_exercises() if x.id == exercise_id), None)
+        self.stats_first = [None, None, None]
         self._pop_dialog()
         self._refresh_stats()
 
     def _choose_interval(self, label: str) -> None:
         self.stats_interval = next(k for k, v in INTERVAL_LABELS.items() if v == label)
-        self.stats_period_start = None  # zmiana interwału wraca do bieżącego tygodnia / miesiąca
-        self.count_shift = 0
+        self.stats_first = [None, None, None]  # zmiana interwału wraca do bieżącego tygodnia / miesiąca
+        self.count_first = None
         self._refresh_stats()
 
     def _refresh_stats(self, update: bool = True) -> None:
@@ -849,62 +883,71 @@ class TrainBeastApp:
         self.stats_interval_text.value = INTERVAL_LABELS[self.stats_interval]
         cards: list[ft.Control] = []
         if exercise is not None:
-            if self.stats_period_start is None:
-                self.stats_period_start = period_range(today, self.stats_interval)[0]
-            self.period_slider.controls = [self._period_pane(self._period_column(exercise, today, self.stats_period_start))]
-            cards.append(self._swipe_gesture(self.period_slider, self._change_period, lambda: self._period_busy))
-        self.count_shift = count_window(today, self.stats_interval, self.count_shift, *self._count_bounds()).shift
-        self.count_slider.controls = [self._count_column(today, self.count_shift).control]
+            cards.append(self._day_charts(exercise, today))
+        self.count_slider.controls = [self._count_column(today).control]
         cards.append(self.count_slider)
         cards.append(ft.Container(height=TAB_SPACER))
         self.stats_charts.controls = cards
         if update:
             self.page.update()
 
-    @staticmethod
-    def _period_pane(content: ft.Control) -> ft.Container:
-        return ft.Container(content, offset=ft.Offset(0, 0))
-
-    def _period_column(self, exercise, today: date, start: date) -> ft.Control:
-        """Trzy wykresy okresu zaczynającego się w `start`, każdy z własnym polem statystyk pod spodem."""
+    def _day_charts(self, exercise, today: date) -> ft.Control:
+        """Trzy wykresy W1, W2, W3: każdy to taśma dni z własną pozycją, zaznaczeniem i polem statystyk pod spodem."""
         interval = self.stats_interval
         daily = self.service.get_exercise_daily_stats(exercise)
-        series = period_series(daily, start, interval, today)
+        tape = exercise_day_tape(daily, today, interval)
+        data = tape_chart_data(daily, tape, today)
         titles = stat_titles(exercise.load_type, exercise.effort_type)
-        cards = exercise_stat_cards(exercise.load_type, exercise.effort_type, daily, start, interval, today)
-        first, last = period_range(start, interval)
-        count = (last - first).days + 1
-        label = period_label(start, interval)
         page_width = self.page.width or 390
         icons = [
             (ft.Icons.FITNESS_CENTER, ft.Icons.EMOJI_EVENTS),
             (ft.Icons.FITNESS_CENTER, ft.Icons.EMOJI_EVENTS),
             (ft.Icons.REPEAT if exercise.effort_type == "reps" else ft.Icons.TIMER, ft.Icons.EMOJI_EVENTS),
         ]
-        days = [first + timedelta(days=n) for n in range(count)]
-        axis_labels = [f"{d.day:02d}.{d.month:02d}" for d in days]
-        tip_titles = [fmt_chart_date(day) for day, _ in series]
-        charts = []
-        for index, (title, unit) in enumerate(zip(titles[:3], titles[3:])):
-            points = [((day - first).days, stats[index]) for day, stats in series]
-            charts.append(
-                PeriodChart(
-                    title,
-                    ft.Text(label, size=13, color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE)),
-                    points,
-                    tip_titles,
-                    axis_labels,
-                    lambda value, unit=unit: f"{fmt_stat_number(value)} {unit}",
-                    nice_axis_scale(v for _, v in points),
-                    self._stat_card(cards[index], icons[index]),
-                    page_width,
-                ).control
+        axis_labels = [f"{d.day:02d}.{d.month:02d}" for d in (tape_day(tape, n) for n in range(tape.count))]
+
+        def window(first: int):
+            return window_stats(exercise.load_type, exercise.effort_type, daily, tape, first, interval, today)
+
+        def build(index: int, title: str, unit: str) -> PeriodChart:
+            saved = self.stats_first[index]
+            first = tape.first if saved is None else clamp_first_index(saved, tape.count, tape.visible)
+            current = window(first)
+            heading = ft.Text(current.label, size=13, color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE))
+
+            async def settled(chart: PeriodChart, new_first: int) -> None:
+                """Taśma zatrzymała się w nowej pozycji: odświeża napis okresu i pole pod wykresem (okres przeważający)."""
+                self.stats_first[index] = new_first
+                shown = window(new_first)
+                chart.heading_extra.value = shown.label
+                chart.heading_extra.update()
+                chart.footer_host.content = self._stat_card(shown.cards[index], icons[index])
+                chart.footer_host.update()
+
+            return PeriodChart(
+                title,
+                heading,
+                data[index].points,
+                [fmt_chart_date(tape_day(tape, x)) for x, _ in data[index].points],
+                axis_labels,
+                lambda value: f"{fmt_stat_number(value)} {unit}",
+                data[index].scale,
+                self._stat_card(current.cards[index], icons[index]),
+                page_width,
+                on_shift=settled,
+                visible=tape.visible,
+                first=first,
+                follow_finger=True,
             )
-        return ft.Column(charts, spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+
+        self.day_charts = [build(i, title, unit) for i, (title, unit) in enumerate(zip(titles[:3], titles[3:]))]
+        return ft.Column([chart.control for chart in self.day_charts], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     @staticmethod
     def _stat_card(card: StatCard, icons: tuple[str, str]) -> ft.Control:
         """Osobne pole pod wykresem: dwie kolumny (ikona, etykieta, wartość, zmiana procentowa, „vs. …”) rozdzielone linią."""
+
+        has_sub = card.left.sublabel is not None or card.right.sublabel is not None  # obie kolumny rezerwują miejsce na podpis
 
         def column(icon, col: StatColumn) -> ft.Control:
             change: list[ft.Control] = []
@@ -916,9 +959,22 @@ class TrainBeastApp:
             return ft.Column(
                 [
                     ft.Row(
-                        [ft.Icon(icon, size=18, color=ACCENT), ft.Text(col.label, size=12, color=ft.Colors.WHITE, expand=True)],
+                        [
+                            ft.Icon(icon, size=18, color=ACCENT),
+                            ft.Column(
+                                [
+                                    ft.Container(ft.Text(col.label, size=12, color=ft.Colors.WHITE), height=STAT_LABEL_HEIGHT),
+                                    *(
+                                        [ft.Container(ft.Text(col.sublabel or "", size=10, color=ft.Colors.with_opacity(0.7, ft.Colors.WHITE), max_lines=1), height=STAT_SUBLABEL_HEIGHT)]
+                                        if has_sub
+                                        else []
+                                    ),
+                                ],
+                                spacing=0,
+                                expand=True,
+                            ),
+                        ],
                         spacing=6,
-                        height=STAT_LABEL_HEIGHT,
                         vertical_alignment=ft.CrossAxisAlignment.START,
                     ),
                     ft.Text(col.display or f"{fmt_stat_number(col.value)} {col.unit}", size=20, weight=ft.FontWeight.BOLD, color=ACCENT, max_lines=1),
@@ -933,7 +989,7 @@ class TrainBeastApp:
             ft.Row(
                 [
                     column(icons[0], card.left),
-                    ft.Container(width=1, height=STATS_DIVIDER_HEIGHT, bgcolor=CHART_GRID_COLOR),
+                    ft.Container(width=1, height=STATS_DIVIDER_HEIGHT + (STAT_SUBLABEL_HEIGHT if has_sub else 0), bgcolor=CHART_GRID_COLOR),
                     column(icons[1], card.right),
                 ],
                 spacing=12,
@@ -945,119 +1001,40 @@ class TrainBeastApp:
             border_radius=CARD_RADIUS,
         )
 
-    def _swipe_gesture(self, content: ft.Control, change, busy) -> ft.GestureDetector:
-        """Poziome przeciągnięcie `content` -> `change(-1)` (w prawo, wcześniej) lub `change(1)` (w lewo, później);
-        kierunek rozpoznaje interpret_swipe, pionowe przewijanie zakładki nie jest przechwytywane; w trakcie animacji
-        (`busy()`) gesty są ignorowane."""
-        drag: list[float] = []  # [x startu, ostatni x]
-
-        def start(e: ft.DragStartEvent) -> None:
-            drag[:] = [e.global_position.x, e.global_position.x]
-
-        def update(e: ft.DragUpdateEvent) -> None:
-            if drag:
-                drag[1] = e.global_position.x
-
-        async def end(e: ft.DragEndEvent) -> None:
-            moved, drag[:] = list(drag), []
-            if not moved or busy():
-                return
-            direction = interpret_swipe(moved[1] - moved[0])
-            if direction:
-                await change(direction)
-
-        return ft.GestureDetector(
-            content,
-            drag_interval=10,
-            on_horizontal_drag_start=start,
-            on_horizontal_drag_update=update,
-            on_horizontal_drag_end=end,
-        )
-
-    async def _slide(self, stack: ft.Stack, incoming: ft.Container, delta: int) -> bool:
-        """Animacja przesuwania w `stack` (ta sama co zmiana dnia w „Workout”: czas, krzywa i kierunek): `incoming`
-        nadjeżdża z przeciwnej strony (delta = -1 z lewej), dotychczasowy blok wyjeżdża. True = animacja zakończona
-        i `incoming` jest jedynym blokiem (widok mógł w międzyczasie zostać przebudowany)."""
-        incoming.left = incoming.right = incoming.top = 0
-        incoming.offset = ft.Offset(delta, 0)
-        current = stack.controls[0]
-        stack.controls.append(incoming)
-        stack.update()
-        await asyncio.sleep(0.03)
-        width = (self.page.width or 390) - 2 * SCREEN_MARGIN
-        duration = settle_duration(0.0, delta, width)
-        began = time.perf_counter()
-        while True:
-            t = min(1.0, (time.perf_counter() - began) / duration)
-            progress = delta * ease_out_cubic(t)  # jak _apply_progress: panel o kroku s leży w s - progress
-            current.offset = ft.Offset(-progress, 0)
-            incoming.offset = ft.Offset(delta - progress, 0)
-            stack.update()
-            if t >= 1.0:
-                break
-            await asyncio.sleep(0.012)
-        if incoming not in stack.controls:
-            return False
-        incoming.left = incoming.right = incoming.top = None
-        incoming.offset = ft.Offset(0, 0)
-        stack.controls = [incoming]
-        stack.update()
-        return True
-
-    async def _change_period(self, delta: int) -> None:
-        """Przesuwa okres o `delta`; animowany jest cały blok trzech wykresów i pól statystyk, reszta ekranu stoi."""
-        today = date.today()
-        new = navigate_period(self.stats_period_start, self.stats_interval, delta, today, self.service.get_first_workout_date())
-        if new == self.stats_period_start or self.stats_exercise is None or self._period_busy:
-            return  # granica lub trwa animacja: nic się nie dzieje
-        self._period_busy = True
-        try:
-            # nowy blok jest budowany przed startem animacji, żeby ciężka praca nie przerywała klatek
-            incoming = self._period_pane(self._period_column(self.stats_exercise, today, new))
-            if await self._slide(self.period_slider, incoming, delta):
-                self.stats_period_start = new
-        finally:
-            self._period_busy = False
-
     # --- wykres liczby treningów ---
     def _count_bounds(self) -> tuple[date | None, date | None]:
         """(pierwszy trening, najnowszy wykonany trening) - granice okna wykresu liczby treningów."""
         return self.service.get_first_workout_date(), self.service.get_last_done_workout_date()
 
-    async def _change_count(self, chart: PeriodChart, periods: int) -> None:
-        """Po puszczeniu palca przesuwa okno o `periods` okresów (ze znakiem), co najwyżej do granicy; animowana jest
-        tylko zawartość wykresu. Poniżej progu lub na granicy zawartość wraca na miejsce."""
-        today = date.today()
-        window = count_window(today, self.stats_interval, self.count_shift, *self._count_bounds())
-        step = limit_swipe_periods(periods, window.shift, window.min_shift, window.max_shift)
-        if step == 0:
-            await chart.snap_back()
-            return
-        incoming = self._count_column(today, window.shift + step)
-        await chart.slide_in(incoming, 1 if step > 0 else -1)
-        if chart.control in self.count_slider.controls:  # widok mógł w międzyczasie zostać przebudowany
-            self.count_shift = window.shift + step
-            self.count_slider.controls = [incoming.control]
-            self.count_slider.update()
-
-    def _count_column(self, today: date, shift: int) -> PeriodChart:
-        """Wykres liczby treningów okna przesuniętego o `shift` (jego `control` zawiera też pole statystyk pod spodem)."""
+    def _count_column(self, today: date) -> PeriodChart:
+        """Wykres liczby treningów: jedna taśma wszystkich okresów (jego `control` zawiera też pole statystyk pod spodem)."""
         interval = self.stats_interval
-        first, last_done = self._count_bounds()
-        window = count_window(today, interval, shift, first, last_done)
+        first_workout, last_done = self._count_bounds()
+        tape = count_tape(today, interval, first_workout, last_done)
+        first = tape.first if self.count_first is None else clamp_first_index(self.count_first, len(tape.starts), tape.visible)
         sections = [c.name for c in self.service.get_categories() if c.name not in self.count_deselected]
         days = self.service.get_workout_days(sections)
-        counts = count_by_period(days, window.starts, interval)
-        labels = [count_period_label(start, interval) for start in window.starts]
-        top, ticks = y_axis_ticks(max(counts, default=0), integer=True)
-        total, average = workouts_total_and_average(days, today, interval, first)
-        cmp = compare_windows(days, window.end, interval, first)
+        counts = count_by_period(days, tape.starts, interval)
+        labels = [count_period_label(start, interval) for start in tape.starts]
         month = interval == "month"
-        vs = "vs. poprzednie 12 miesięcy" if month else "vs. poprzednie 12 tygodni"
-        card = StatCard(
-            StatColumn("Treningi od początku", total, "", cmp.total_pct, vs, str(total)),
-            StatColumn("Średnia na miesiąc" if month else "Średnia na tydzień", average, "", cmp.average_pct, vs, fmt_average(average)),
-        )
+
+        def footer(index: int) -> ft.Control:
+            """Pole pod wykresem dla okna zaczynającego się na `index` taśmy."""
+            total, average = workouts_total_and_average(days, today, interval, first_workout)
+            cmp = compare_windows(days, tape.starts[index + tape.visible - 1], interval, first_workout)
+            vs = "vs. poprzednie 12 miesięcy" if month else "vs. poprzednie 12 tygodni"
+            card = StatCard(
+                StatColumn("Treningi od początku", total, "", cmp.total_pct, vs, str(total)),
+                StatColumn("Średnia na miesiąc" if month else "Średnia na tydzień", average, "", cmp.average_pct, vs, fmt_average(average)),
+            )
+            return self._stat_card(card, (ft.Icons.FITNESS_CENTER, ft.Icons.EMOJI_EVENTS))
+
+        async def settled(chart: PeriodChart, index: int) -> None:
+            """Taśma zatrzymała się w nowej pozycji: odświeża pole pod wykresem."""
+            self.count_first = index
+            chart.footer_host.content = footer(index)
+            chart.footer_host.update()
+
         filter_button = ft.IconButton(
             icon=ft.Icons.FILTER_LIST,
             icon_size=20,
@@ -1074,15 +1051,17 @@ class TrainBeastApp:
             labels,
             labels,
             fmt_workouts,
-            AxisScale(0, top, ticks),
-            self._stat_card(card, (ft.Icons.FITNESS_CENTER, ft.Icons.EMOJI_EVENTS)),
+            count_axis_scale(counts),
+            footer(first),
             self.page.width or 390,
             highlight_label=True,
-            on_shift=self._change_count,
+            on_shift=settled,
+            visible=tape.visible,
+            first=first,
         )
 
     def _rebuild_count(self) -> None:
-        self.count_slider.controls = [self._count_column(date.today(), self.count_shift).control]
+        self.count_slider.controls = [self._count_column(date.today()).control]
         self.count_slider.update()
 
     def _open_count_filter(self, e=None) -> None:

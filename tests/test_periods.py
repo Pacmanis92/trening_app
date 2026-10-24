@@ -7,12 +7,10 @@ from trainbeast.services import (
     DailyStats,
     SetRow,
     aggregate_daily,
-    default_selected_index,
     demo_catalog_measures,
     demo_start_date,
     fmt_percent,
     generate_demo_workouts,
-    navigate_period,
     percent_change,
     period_label,
     period_range,
@@ -76,7 +74,6 @@ def test_series_skips_days_without_sets():
     daily = {date(2026, 10, 20): DailyStats(5, 4, 3), date(2026, 10, 22): DailyStats(1, 1, 1)}
     series = period_series(daily, today, "week", today)
     assert series == [(date(2026, 10, 20), DailyStats(5, 4, 3)), (date(2026, 10, 22), DailyStats(1, 1, 1))]
-    assert default_selected_index(series) == 1  # ostatni dzień z danymi
 
 
 def test_series_future_days_skipped_and_other_periods_excluded():
@@ -90,41 +87,15 @@ def test_series_future_days_skipped_and_other_periods_excluded():
     assert [d for d, _ in series] == [date(2026, 10, 20)]
 
 
-def test_series_no_data_is_empty_and_nothing_selected():
+def test_series_no_data_is_empty():
     today = date(2026, 10, 21)
     assert period_series({}, today, "month", today) == []
-    assert default_selected_index([]) is None
 
 
 def test_series_single_day():
     today = date(2026, 10, 21)
     series = period_series({date(2026, 10, 3): DailyStats(1, 2, 3)}, today, "month", today)
-    assert len(series) == 1 and default_selected_index(series) == 0
-
-
-# --- nawigacja ---
-def test_navigation_back_to_first_workout_period_and_blocked_forward():
-    today = date(2026, 10, 21)
-    first = date(2026, 8, 20)
-    start = period_range(today, "month")[0]
-    assert navigate_period(start, "month", 1, today, first) == start  # za bieżący okres nie
-    start = navigate_period(start, "month", -1, today, first)
-    assert start == date(2026, 9, 1)
-    start = navigate_period(start, "month", -1, today, first)
-    assert start == date(2026, 8, 1)
-    assert navigate_period(start, "month", -1, today, first) == start  # przed okresem pierwszego treningu nie
-    assert navigate_period(start, "month", 1, today, first) == date(2026, 9, 1)
-
-
-def test_navigation_weeks_and_no_workouts():
-    today = date(2026, 10, 21)
-    first = date(2026, 10, 14)
-    cur = period_range(today, "week")[0]
-    prev = navigate_period(cur, "week", -1, today, first)
-    assert prev == date(2026, 10, 12)
-    assert navigate_period(prev, "week", -1, today, first) == prev
-    assert navigate_period(cur, "week", -1, today, None) == cur  # brak treningów: bez cofania
-    assert navigate_period(cur, "week", 1, today, None) == cur
+    assert len(series) == 1
 
 
 # --- statystyki okresu ---
